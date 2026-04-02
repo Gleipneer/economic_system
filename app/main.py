@@ -12,7 +12,7 @@ dedicated routes or services without polluting basic CRUD handlers.
 
 Usage::
 
-    uvicorn economic_system.app.main:app --reload
+    uvicorn app.main:app --reload
 
 The ``init_db`` function will ensure that database tables are created on
 application startup. The database connection URL can be configured via
@@ -21,21 +21,29 @@ reverse proxy or within a Tailscale network, ensure that appropriate
 authentication and transport security is applied at the proxy layer.
 """
 
+import hashlib
+from datetime import date
+from pathlib import Path
+from uuid import uuid4
 from typing import List
 
-from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 
-from . import database, models, schemas
+from . import calculations, database, models, schemas
+from .settings import get_settings
 
+settings = get_settings()
 app = FastAPI(title="Household Economics Backend", version="0.1.0")
+STATIC_ROOT = Path(__file__).resolve().parent / "static"
+UPLOAD_ROOT = Path(settings.upload_dir).resolve()
 
-# Allow all CORS origins by default. In production you should set this
-# to the specific origins used by your frontend (e.g. http://localhost:3000).
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=settings.cors_allow_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -56,6 +64,7 @@ def get_db() -> Session:
 @app.on_event("startup")
 def on_startup() -> None:
     """Initialise the database on application startup."""
+    UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
     database.init_db()
 
 
@@ -65,6 +74,199 @@ def get_object_or_404(db: Session, model, obj_id: int):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
                             detail=f"{model.__name__} with id {obj_id} not found")
     return obj
+
+
+@app.get("/healthz")
+def healthz():
+    return {"status": "ok"}
+
+
+@app.get("/system/validation_markdown", include_in_schema=False)
+def system_validation_markdown():
+    return FileResponse(Path(__file__).resolve().parents[1] / "docs" / "SYSTEM_VALIDATION.md")
+
+if STATIC_ROOT.exists():
+    app.mount("/assets", StaticFiles(directory=STATIC_ROOT), name="assets")
+
+
+@app.get("/")
+def home():
+    return FileResponse(STATIC_ROOT / "index.html")
+
+
+def ensure_household_exists(db: Session, household_id: int):
+    return get_object_or_404(db, models.Household, household_id)
+
+
+def upload_to_disk(household_id: int, file: UploadFile) -> tuple[str, str]:
+    household_dir = UPLOAD_ROOT / str(household_id)
+    household_dir.mkdir(parents=True, exist_ok=True)
+    raw = file.file.read()
+    checksum = hashlib.sha256(raw).hexdigest()
+    safe_name = f"{uuid4().hex}_{Path(file.filename or 'document.bin').name}"
+    destination = household_dir / safe_name
+    destination.write_bytes(raw)
+    return str(destination.resolve()), checksum
+
+
+def draft_target_config(target_entity_type: str):
+    mapping = {
+        "person": (schemas.PersonCreate, models.Person),
+        "income_source": (schemas.IncomeSourceCreate, models.IncomeSource),
+        "loan": (schemas.LoanCreate, models.Loan),
+        "recurring_cost": (schemas.RecurringCostCreate, models.RecurringCost),
+        "subscription_contract": (schemas.SubscriptionContractCreate, models.SubscriptionContract),
+        "insurance_policy": (schemas.InsurancePolicyCreate, models.InsurancePolicy),
+        "vehicle": (schemas.VehicleCreate, models.Vehicle),
+        "asset": (schemas.AssetCreate, models.Asset),
+        "housing_scenario": (schemas.HousingScenarioCreate, models.HousingScenario),
+        "document": (schemas.DocumentCreate, models.Document),
+        "optimization_opportunity": (schemas.OptimizationOpportunityCreate, models.OptimizationOpportunity),
+        "scenario": (schemas.ScenarioCreate, models.Scenario),
+        "scenario_result": (schemas.ScenarioResultCreate, models.ScenarioResult),
+        "report_snapshot": (schemas.ReportSnapshotCreate, models.ReportSnapshot),
+    }
+    normalized = target_entity_type.strip().lower()
+    if normalized not in mapping:
+        raise HTTPException(status_code=400, detail=f"Unsupported draft target_entity_type: {target_entity_type}")
+    return mapping[normalized], normalized
+
+
+def build_assistant_answer(db: Session, household_id: int, prompt: str) -> str:
+    records = calculations.load_household_records(db, household_id)
+    summary = calculations.build_household_summary(records, household_id)
+    subscriptions = records["subscription_contracts"]
+    opportunities = sorted(
+        records["optimization_opportunities"],
+        key=lambda item: float(item.get("estimated_monthly_saving") or 0.0),
+        reverse=True,
+    )
+    housing = db.query(models.HousingScenario).filter_by(household_id=household_id).order_by(models.HousingScenario.id.asc()).all()
+    documents = records["documents"]
+    drafts = [item for item in records["extraction_drafts"] if item.get("status") == "pending_review"]
+
+    lines: list[str] = [
+        f"**Månadsinkomst:** {round(summary['monthly_income'], 0):.0f} kr",
+        f"**Månadskostnader:** {round(summary['monthly_total_expenses'], 0):.0f} kr",
+        f"**Kvar efter kostnader:** {round(summary['monthly_net_cashflow'], 0):.0f} kr",
+        "",
+    ]
+
+    prompt_lower = prompt.lower()
+    if "boende" in prompt_lower or "bostad" in prompt_lower:
+        if housing:
+            latest = housing[-1]
+            evaluation = calculations.evaluate_housing_scenario(latest)
+            lines.extend(
+                [
+                    "### Boendekalkyl",
+                    f"- Senaste scenario: **{evaluation['label']}**",
+                    f"- Månadskostnad: **{round(evaluation['monthly_total_cost'], 0):.0f} kr**",
+                    f"- Årskostnad: **{round(evaluation['yearly_total_cost'], 0):.0f} kr**",
+                    f"- Kvar efter boendet: **{round(summary['monthly_net_cashflow'] - evaluation['monthly_total_cost'], 0):.0f} kr**",
+                ]
+            )
+        else:
+            lines.extend(
+                [
+                    "### Boendekalkyl",
+                    "- Det finns ännu inget sparat boendescenario att förklara.",
+                    "- Skapa ett boendescenario så kan jag sammanfatta kalkylen med riktiga siffror.",
+                ]
+            )
+    elif "abonnemang" in prompt_lower or "avtal" in prompt_lower:
+        lines.append("### Abonnemang och avtal")
+        if subscriptions:
+            ranked = sorted(
+                subscriptions,
+                key=lambda item: (
+                    float(item.get("ordinary_cost") or 0.0) - float(item.get("current_monthly_cost") or 0.0),
+                    float(item.get("current_monthly_cost") or 0.0),
+                ),
+                reverse=True,
+            )[:3]
+            for item in ranked:
+                current_cost = float(item.get("current_monthly_cost") or 0.0)
+                ordinary_cost = float(item.get("ordinary_cost") or 0.0)
+                delta = ordinary_cost - current_cost if ordinary_cost > current_cost else 0.0
+                action = "Granska snarast" if delta > 0 else "Behåll under uppsikt"
+                lines.append(
+                    f"- **{item.get('provider')} {item.get('product_name') or ''}**: {round(current_cost, 0):.0f} kr/mån. {action}.{f' Ordinarie pris är {round(ordinary_cost, 0):.0f} kr/mån.' if delta else ''}"
+                )
+        else:
+            lines.append("- Det finns inga abonnemang registrerade ännu.")
+    elif "risk" in prompt_lower:
+        lines.append("### Största risker just nu")
+        if summary["monthly_net_cashflow"] < 0:
+            lines.append("- Hushållet går back varje månad. Börja med lån, abonnemang och återkommande kostnader.")
+        if summary["gross_income_only_entries"] > 0:
+            lines.append("- Minst en inkomst saknar nettobelopp. Kassaflödet är därför mindre säkert.")
+        if drafts:
+            lines.append(f"- Det finns **{len(drafts)}** dokumentutkast som väntar på granskning.")
+        if len(lines) == 5:
+            lines.append("- Jag ser ingen akut varningssignal i de registrerade siffrorna just nu.")
+    else:
+        lines.append("### Det viktigaste just nu")
+        if opportunities:
+            for index, item in enumerate(opportunities[:3], start=1):
+                lines.append(
+                    f"{index}. **{item.get('title')}** — uppskattad besparing **{round(float(item.get('estimated_monthly_saving') or 0.0), 0):.0f} kr/mån**."
+                )
+        else:
+            lines.append("- Det finns ännu inga sparade förbättringsförslag. Kör en ny skanning för att få riktiga rekommendationer.")
+        if documents:
+            lines.append(f"- Registrerade dokument: **{len(documents)}**")
+        if drafts:
+            lines.append(f"- Utkast att granska: **{len(drafts)}**")
+
+    return "\n".join(lines)
+
+
+def create_or_get_opportunity(
+    db: Session,
+    household_id: int,
+    *,
+    kind: str,
+    target_entity_type: str,
+    target_entity_id: int,
+    title: str,
+    rationale: str,
+    estimated_monthly_saving: float,
+    confidence: float,
+):
+    existing = (
+        db.query(models.OptimizationOpportunity)
+        .filter_by(
+            household_id=household_id,
+            kind=kind,
+            target_entity_type=target_entity_type,
+            target_entity_id=target_entity_id,
+            title=title,
+            status="open",
+        )
+        .first()
+    )
+    if existing:
+        return existing
+
+    opportunity = models.OptimizationOpportunity(
+        household_id=household_id,
+        kind=kind,
+        target_entity_type=target_entity_type,
+        target_entity_id=target_entity_id,
+        title=title,
+        rationale=rationale,
+        estimated_monthly_saving=round(estimated_monthly_saving, 2),
+        estimated_yearly_saving=round(estimated_monthly_saving * 12, 2),
+        confidence=confidence,
+        effort_level="medium",
+        risk_level="low" if kind == "cancel" else "medium",
+        reversibility="high",
+        status="open",
+    )
+    db.add(opportunity)
+    db.flush()
+    return opportunity
 
 
 # --- Household Endpoints ---
@@ -103,6 +305,94 @@ def delete_household(household_id: int, db: Session = Depends(get_db)):
     db.delete(db_household)
     db.commit()
     return
+
+
+@app.get("/households/{household_id}/summary", response_model=schemas.HouseholdSummaryRead)
+def get_household_summary(household_id: int, db: Session = Depends(get_db)):
+    ensure_household_exists(db, household_id)
+    return calculations.build_household_summary(calculations.load_household_records(db, household_id), household_id)
+
+
+@app.post("/households/{household_id}/report_snapshots/generate", response_model=schemas.ReportSnapshotRead)
+def generate_household_report_snapshot(
+    household_id: int,
+    request: schemas.ReportGenerateRequest,
+    db: Session = Depends(get_db),
+):
+    ensure_household_exists(db, household_id)
+    summary = calculations.build_household_summary(calculations.load_household_records(db, household_id), household_id)
+    snapshot = models.ReportSnapshot(
+        household_id=household_id,
+        type=request.type,
+        as_of_date=request.as_of_date or date.today(),
+        assumption_json=request.assumption_json,
+        result_json=summary,
+    )
+    db.add(snapshot)
+    db.commit()
+    db.refresh(snapshot)
+    return snapshot
+
+
+@app.post("/households/{household_id}/optimization_scan", response_model=List[schemas.OptimizationOpportunityRead])
+def optimization_scan(household_id: int, db: Session = Depends(get_db)):
+    ensure_household_exists(db, household_id)
+    results = []
+
+    subscriptions = db.query(models.SubscriptionContract).filter_by(household_id=household_id).all()
+    for subscription in subscriptions:
+        if subscription.ordinary_cost and subscription.current_monthly_cost and subscription.ordinary_cost > subscription.current_monthly_cost:
+            results.append(
+                create_or_get_opportunity(
+                    db,
+                    household_id,
+                    kind="renegotiate",
+                    target_entity_type="subscription_contract",
+                    target_entity_id=subscription.id,
+                    title=f"Review {subscription.provider} pricing",
+                    rationale="Ordinary price is above current price and likely worth renegotiating.",
+                    estimated_monthly_saving=subscription.ordinary_cost - subscription.current_monthly_cost,
+                    confidence=0.72,
+                )
+            )
+        if subscription.household_criticality == "optional" and (subscription.current_monthly_cost or 0) > 0:
+            results.append(
+                create_or_get_opportunity(
+                    db,
+                    household_id,
+                    kind="cancel",
+                    target_entity_type="subscription_contract",
+                    target_entity_id=subscription.id,
+                    title=f"Cancel optional subscription: {subscription.provider}",
+                    rationale="Marked optional and contributes recurring monthly cost.",
+                    estimated_monthly_saving=subscription.current_monthly_cost,
+                    confidence=0.61,
+                )
+            )
+
+    recurring_costs = db.query(models.RecurringCost).filter_by(household_id=household_id).all()
+    for cost in recurring_costs:
+        if cost.controllability in {models.Controllability.reducible, models.Controllability.discretionary}:
+            monthly_amount = calculations.amount_to_monthly(cost.amount, cost.frequency)
+            if monthly_amount > 0:
+                results.append(
+                    create_or_get_opportunity(
+                        db,
+                        household_id,
+                        kind="reduce_usage",
+                        target_entity_type="recurring_cost",
+                        target_entity_id=cost.id,
+                        title=f"Reduce {cost.category}",
+                        rationale="Cost is marked reducible/discretionary.",
+                        estimated_monthly_saving=monthly_amount * 0.15,
+                        confidence=0.55,
+                    )
+                )
+
+    db.commit()
+    for item in results:
+        db.refresh(item)
+    return results
 
 
 # --- Person Endpoints ---
@@ -470,9 +760,52 @@ def create_document(document: schemas.DocumentCreate, db: Session = Depends(get_
     return db_doc
 
 
+@app.post("/documents/upload", response_model=schemas.DocumentRead, status_code=status.HTTP_201_CREATED)
+def upload_document(
+    household_id: int = Form(...),
+    document_type: str = Form(...),
+    file: UploadFile = File(...),
+    issuer: str | None = Form(None),
+    currency: str | None = Form(None),
+    extracted_text: str | None = Form(None),
+    db: Session = Depends(get_db),
+):
+    ensure_household_exists(db, household_id)
+    storage_path, checksum = upload_to_disk(household_id, file)
+    document = models.Document(
+        household_id=household_id,
+        document_type=document_type,
+        file_name=file.filename or "uploaded-file",
+        mime_type=file.content_type,
+        checksum=checksum,
+        issuer=issuer,
+        currency=currency,
+        extracted_text=extracted_text,
+        extraction_status="pending",
+        storage_path=storage_path,
+    )
+    db.add(document)
+    db.commit()
+    db.refresh(document)
+    return document
+
+
 @app.get("/documents/{doc_id}", response_model=schemas.DocumentRead)
 def read_document(doc_id: int, db: Session = Depends(get_db)):
     return get_object_or_404(db, models.Document, doc_id)
+
+
+@app.get("/documents/{doc_id}/download", include_in_schema=False)
+def download_document(doc_id: int, db: Session = Depends(get_db)):
+    document = get_object_or_404(db, models.Document, doc_id)
+    if not document.storage_path:
+        raise HTTPException(status_code=404, detail="Document has no stored file")
+    file_path = Path(document.storage_path)
+    if not file_path.is_absolute():
+        file_path = Path.cwd() / file_path
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="Stored file not found")
+    return FileResponse(file_path, filename=document.file_name, media_type=document.mime_type)
 
 
 @app.put("/documents/{doc_id}", response_model=schemas.DocumentRead)
@@ -521,6 +854,30 @@ def update_extraction_draft(draft_id: int, draft: schemas.ExtractionDraftUpdate,
     db.commit()
     db.refresh(db_draft)
     return db_draft
+
+
+@app.post("/extraction_drafts/{draft_id}/apply", response_model=schemas.ExtractionApplyRead)
+def apply_extraction_draft(draft_id: int, db: Session = Depends(get_db)):
+    draft = get_object_or_404(db, models.ExtractionDraft, draft_id)
+    if draft.status == "approved":
+        raise HTTPException(status_code=400, detail="Draft already approved")
+
+    (schema_class, model_class), normalized = draft_target_config(draft.target_entity_type)
+    proposed = dict(draft.proposed_json or {})
+    if "household_id" in getattr(schema_class, "__fields__", {}) and "household_id" not in proposed:
+        proposed["household_id"] = draft.household_id
+    payload = schema_class(**proposed)
+    entity = model_class(**payload.dict())
+    db.add(entity)
+    db.flush()
+    draft.status = "approved"
+    db.commit()
+    return {
+        "draft_id": draft.id,
+        "target_entity_type": normalized,
+        "target_entity_id": entity.id,
+        "status": draft.status,
+    }
 
 
 @app.delete("/extraction_drafts/{draft_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -591,6 +948,34 @@ def create_scenario(scenario: schemas.ScenarioCreate, db: Session = Depends(get_
 @app.get("/scenarios/{scenario_id}", response_model=schemas.ScenarioRead)
 def read_scenario(scenario_id: int, db: Session = Depends(get_db)):
     return get_object_or_404(db, models.Scenario, scenario_id)
+
+
+@app.post("/scenarios/{scenario_id}/run", response_model=schemas.ScenarioResultRead)
+def run_scenario(scenario_id: int, db: Session = Depends(get_db)):
+    scenario = get_object_or_404(db, models.Scenario, scenario_id)
+    baseline_records = calculations.load_household_records(db, scenario.household_id)
+    projected_records = calculations.apply_scenario_adjustments(
+        baseline_records, list((scenario.change_set_json or {}).get("adjustments", []))
+    )
+    baseline_summary = calculations.build_household_summary(baseline_records, scenario.household_id)
+    projected_summary = calculations.build_household_summary(projected_records, scenario.household_id)
+
+    result = models.ScenarioResult(
+        household_id=scenario.household_id,
+        scenario_id=scenario.id,
+        result_json={
+            "baseline": baseline_summary,
+            "projected": projected_summary,
+            "adjustments": list((scenario.change_set_json or {}).get("adjustments", [])),
+        },
+        monthly_delta=round(projected_summary["monthly_net_cashflow"] - baseline_summary["monthly_net_cashflow"], 2),
+        yearly_delta=round(projected_summary["yearly_net_cashflow"] - baseline_summary["yearly_net_cashflow"], 2),
+        liquidity_delta=round(projected_summary["asset_liquid_value"] - baseline_summary["asset_liquid_value"], 2),
+    )
+    db.add(result)
+    db.commit()
+    db.refresh(result)
+    return result
 
 
 @app.put("/scenarios/{scenario_id}", response_model=schemas.ScenarioRead)
@@ -689,3 +1074,39 @@ def delete_report_snapshot(snapshot_id: int, db: Session = Depends(get_db)):
     db.delete(db_snapshot)
     db.commit()
     return
+
+
+@app.get("/housing_scenarios/{scenario_id}/evaluate", response_model=schemas.HousingScenarioEvaluationRead)
+def evaluate_housing_scenario_endpoint(scenario_id: int, db: Session = Depends(get_db)):
+    scenario = get_object_or_404(db, models.HousingScenario, scenario_id)
+    return calculations.evaluate_housing_scenario(scenario)
+
+
+@app.post(
+    "/households/{household_id}/assistant/respond",
+    response_model=schemas.AssistantPromptResponse,
+)
+def household_assistant_respond(
+    household_id: int,
+    request_body: schemas.AssistantPromptRequest,
+    db: Session = Depends(get_db),
+):
+    ensure_household_exists(db, household_id)
+    return {
+        "household_id": household_id,
+        "prompt": request_body.prompt,
+        "answer": build_assistant_answer(db, household_id, request_body.prompt),
+    }
+
+
+@app.get("/{frontend_path:path}", include_in_schema=False)
+def frontend_app(frontend_path: str):
+    if frontend_path.startswith("assets/"):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+    return FileResponse(STATIC_ROOT / "index.html")
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run("app.main:app", host=settings.app_host, port=settings.app_port, reload=False)

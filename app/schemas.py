@@ -14,7 +14,7 @@ responses by composing nested schemas explicitly.
 """
 
 from datetime import date, datetime
-from typing import Optional, List, Any
+from typing import Optional, List, Any, Dict
 from pydantic import BaseModel, Field
 
 from .models import IncomeFrequency, LoanRepaymentModel, VariabilityClass, Controllability, SubscriptionCategory
@@ -32,7 +32,9 @@ class HouseholdCreate(HouseholdBase):
 
 
 class HouseholdUpdate(HouseholdBase):
-    pass
+    name: Optional[str] = None
+    currency: Optional[str] = None
+    primary_country: Optional[str] = None
 
 
 class HouseholdRead(HouseholdBase):
@@ -57,7 +59,11 @@ class PersonCreate(PersonBase):
 
 
 class PersonUpdate(PersonBase):
-    pass
+    household_id: Optional[int] = None
+    name: Optional[str] = None
+    role: Optional[str] = None
+    income_share_mode: Optional[str] = None
+    active: Optional[bool] = None
 
 
 class PersonRead(PersonBase):
@@ -89,7 +95,18 @@ class IncomeSourceCreate(IncomeSourceBase):
 
 
 class IncomeSourceUpdate(IncomeSourceBase):
-    pass
+    person_id: Optional[int] = None
+    type: Optional[str] = None
+    gross_amount: Optional[float] = None
+    net_amount: Optional[float] = None
+    frequency: Optional[IncomeFrequency] = None
+    regularity: Optional[str] = None
+    source: Optional[str] = None
+    start_date: Optional[date] = None
+    end_date: Optional[date] = None
+    verified: Optional[bool] = None
+    verification_doc_id: Optional[int] = None
+    note: Optional[str] = None
 
 
 class IncomeSourceRead(IncomeSourceBase):
@@ -105,9 +122,12 @@ class LoanBase(BaseModel):
     household_id: int
     person_id: Optional[int] = None
     type: str
+    purpose: Optional[str] = None
     lender: Optional[str] = None
     original_amount: Optional[float] = None
     current_balance: Optional[float] = None
+    remaining_term_months: Optional[int] = None
+    planned_end_date: Optional[date] = None
     nominal_rate: Optional[float] = None
     effective_rate: Optional[float] = None
     repayment_model: LoanRepaymentModel = LoanRepaymentModel.annuity
@@ -128,7 +148,28 @@ class LoanCreate(LoanBase):
 
 
 class LoanUpdate(LoanBase):
-    pass
+    household_id: Optional[int] = None
+    person_id: Optional[int] = None
+    type: Optional[str] = None
+    purpose: Optional[str] = None
+    lender: Optional[str] = None
+    original_amount: Optional[float] = None
+    current_balance: Optional[float] = None
+    remaining_term_months: Optional[int] = None
+    planned_end_date: Optional[date] = None
+    nominal_rate: Optional[float] = None
+    effective_rate: Optional[float] = None
+    repayment_model: Optional[LoanRepaymentModel] = None
+    required_monthly_payment: Optional[float] = None
+    amortization_amount_monthly: Optional[float] = None
+    due_day: Optional[int] = None
+    fixed_rate_until: Optional[date] = None
+    secured: Optional[bool] = None
+    linked_asset_id: Optional[int] = None
+    autopay: Optional[bool] = None
+    statement_doc_id: Optional[int] = None
+    status: Optional[str] = None
+    note: Optional[str] = None
 
 
 class LoanRead(LoanBase):
@@ -163,7 +204,21 @@ class RecurringCostCreate(RecurringCostBase):
 
 
 class RecurringCostUpdate(RecurringCostBase):
-    pass
+    household_id: Optional[int] = None
+    person_id: Optional[int] = None
+    category: Optional[str] = None
+    subcategory: Optional[str] = None
+    amount: Optional[float] = None
+    frequency: Optional[IncomeFrequency] = None
+    mandatory: Optional[bool] = None
+    variability_class: Optional[VariabilityClass] = None
+    controllability: Optional[Controllability] = None
+    vendor: Optional[str] = None
+    payment_method: Optional[str] = None
+    due_day: Optional[int] = None
+    start_date: Optional[date] = None
+    end_date: Optional[date] = None
+    note: Optional[str] = None
 
 
 class RecurringCostRead(RecurringCostBase):
@@ -212,7 +267,35 @@ class SubscriptionContractCreate(SubscriptionContractBase):
 
 
 class SubscriptionContractUpdate(SubscriptionContractBase):
-    pass
+    household_id: Optional[int] = None
+    person_id: Optional[int] = None
+    category: Optional[SubscriptionCategory] = None
+    provider: Optional[str] = None
+    product_name: Optional[str] = None
+    contract_type: Optional[str] = None
+    current_monthly_cost: Optional[float] = None
+    promotional_cost: Optional[float] = None
+    promotional_end_date: Optional[date] = None
+    ordinary_cost: Optional[float] = None
+    billing_frequency: Optional[IncomeFrequency] = None
+    binding_start_date: Optional[date] = None
+    binding_end_date: Optional[date] = None
+    notice_period_days: Optional[int] = None
+    auto_renew: Optional[bool] = None
+    cancellation_method: Optional[str] = None
+    cancellation_url: Optional[str] = None
+    service_address: Optional[str] = None
+    usage_metric_type: Optional[str] = None
+    usage_metric_estimate: Optional[float] = None
+    included_allowance: Optional[float] = None
+    overage_risk: Optional[str] = None
+    bundling_flag: Optional[bool] = None
+    household_criticality: Optional[str] = None
+    market_checkable: Optional[bool] = None
+    last_negotiated_at: Optional[date] = None
+    next_review_at: Optional[date] = None
+    latest_invoice_doc_id: Optional[int] = None
+    note: Optional[str] = None
 
 
 class SubscriptionContractRead(SubscriptionContractBase):
@@ -243,7 +326,17 @@ class InsurancePolicyCreate(InsurancePolicyBase):
 
 
 class InsurancePolicyUpdate(InsurancePolicyBase):
-    pass
+    household_id: Optional[int] = None
+    type: Optional[str] = None
+    provider: Optional[str] = None
+    premium_monthly: Optional[float] = None
+    deductible: Optional[float] = None
+    coverage_tier: Optional[str] = None
+    renewal_date: Optional[date] = None
+    binding_end_date: Optional[date] = None
+    linked_asset_id: Optional[int] = None
+    comparison_score: Optional[float] = None
+    note: Optional[str] = None
 
 
 class InsurancePolicyRead(InsurancePolicyBase):
@@ -279,7 +372,22 @@ class VehicleCreate(VehicleBase):
 
 
 class VehicleUpdate(VehicleBase):
-    pass
+    household_id: Optional[int] = None
+    owner_person_id: Optional[int] = None
+    make: Optional[str] = None
+    model: Optional[str] = None
+    year: Optional[int] = None
+    fuel_type: Optional[str] = None
+    estimated_value: Optional[float] = None
+    loan_id: Optional[int] = None
+    insurance_policy_id: Optional[int] = None
+    tax_monthly_estimate: Optional[float] = None
+    fuel_monthly_estimate: Optional[float] = None
+    service_monthly_estimate: Optional[float] = None
+    parking_monthly_estimate: Optional[float] = None
+    toll_monthly_estimate: Optional[float] = None
+    tire_monthly_estimate: Optional[float] = None
+    note: Optional[str] = None
 
 
 class VehicleRead(VehicleBase):
@@ -310,7 +418,17 @@ class AssetCreate(AssetBase):
 
 
 class AssetUpdate(AssetBase):
-    pass
+    household_id: Optional[int] = None
+    person_id: Optional[int] = None
+    type: Optional[str] = None
+    institution: Optional[str] = None
+    label: Optional[str] = None
+    market_value: Optional[float] = None
+    liquid_value: Optional[float] = None
+    pledged: Optional[bool] = None
+    updated_at: Optional[datetime] = None
+    verification_doc_id: Optional[int] = None
+    note: Optional[str] = None
 
 
 class AssetRead(AssetBase):
@@ -341,7 +459,17 @@ class HousingScenarioCreate(HousingScenarioBase):
 
 
 class HousingScenarioUpdate(HousingScenarioBase):
-    pass
+    household_id: Optional[int] = None
+    label: Optional[str] = None
+    purchase_price: Optional[float] = None
+    down_payment: Optional[float] = None
+    mortgage_needed: Optional[float] = None
+    rate_assumption: Optional[float] = None
+    amortization_rate: Optional[float] = None
+    monthly_fee_or_operating_cost: Optional[float] = None
+    monthly_insurance: Optional[float] = None
+    monthly_property_cost_estimate: Optional[float] = None
+    note: Optional[str] = None
 
 
 class HousingScenarioRead(HousingScenarioBase):
@@ -376,7 +504,21 @@ class DocumentCreate(DocumentBase):
 
 
 class DocumentUpdate(DocumentBase):
-    pass
+    household_id: Optional[int] = None
+    document_type: Optional[str] = None
+    file_name: Optional[str] = None
+    mime_type: Optional[str] = None
+    checksum: Optional[str] = None
+    issuer: Optional[str] = None
+    issue_date: Optional[date] = None
+    period_start: Optional[date] = None
+    period_end: Optional[date] = None
+    total_amount: Optional[float] = None
+    vat_amount: Optional[float] = None
+    currency: Optional[str] = None
+    extracted_text: Optional[str] = None
+    extraction_status: Optional[str] = None
+    storage_path: Optional[str] = None
 
 
 class DocumentRead(DocumentBase):
@@ -403,7 +545,13 @@ class ExtractionDraftCreate(ExtractionDraftBase):
 
 
 class ExtractionDraftUpdate(ExtractionDraftBase):
-    pass
+    household_id: Optional[int] = None
+    document_id: Optional[int] = None
+    target_entity_type: Optional[str] = None
+    proposed_json: Optional[Any] = None
+    confidence: Optional[float] = None
+    status: Optional[str] = None
+    model_name: Optional[str] = None
 
 
 class ExtractionDraftRead(ExtractionDraftBase):
@@ -438,7 +586,21 @@ class OptimizationOpportunityCreate(OptimizationOpportunityBase):
 
 
 class OptimizationOpportunityUpdate(OptimizationOpportunityBase):
-    pass
+    household_id: Optional[int] = None
+    kind: Optional[str] = None
+    target_entity_type: Optional[str] = None
+    target_entity_id: Optional[int] = None
+    title: Optional[str] = None
+    rationale: Optional[str] = None
+    estimated_monthly_saving: Optional[float] = None
+    estimated_yearly_saving: Optional[float] = None
+    confidence: Optional[float] = None
+    effort_level: Optional[str] = None
+    risk_level: Optional[str] = None
+    reversibility: Optional[str] = None
+    evidence_json: Optional[Any] = None
+    source_refs_json: Optional[Any] = None
+    status: Optional[str] = None
 
 
 class OptimizationOpportunityRead(OptimizationOpportunityBase):
@@ -460,7 +622,9 @@ class ScenarioCreate(ScenarioBase):
 
 
 class ScenarioUpdate(ScenarioBase):
-    pass
+    household_id: Optional[int] = None
+    label: Optional[str] = None
+    change_set_json: Optional[Any] = None
 
 
 class ScenarioRead(ScenarioBase):
@@ -485,7 +649,12 @@ class ScenarioResultCreate(ScenarioResultBase):
 
 
 class ScenarioResultUpdate(ScenarioResultBase):
-    pass
+    household_id: Optional[int] = None
+    scenario_id: Optional[int] = None
+    result_json: Optional[Any] = None
+    monthly_delta: Optional[float] = None
+    yearly_delta: Optional[float] = None
+    liquidity_delta: Optional[float] = None
 
 
 class ScenarioResultRead(ScenarioResultBase):
@@ -509,7 +678,11 @@ class ReportSnapshotCreate(ReportSnapshotBase):
 
 
 class ReportSnapshotUpdate(ReportSnapshotBase):
-    pass
+    household_id: Optional[int] = None
+    type: Optional[str] = None
+    as_of_date: Optional[date] = None
+    assumption_json: Optional[Any] = None
+    result_json: Optional[Any] = None
 
 
 class ReportSnapshotRead(ReportSnapshotBase):
@@ -517,3 +690,71 @@ class ReportSnapshotRead(ReportSnapshotBase):
     generated_at: datetime
     class Config:
         orm_mode = True
+
+
+class HouseholdSummaryRead(BaseModel):
+    household_id: int
+    monthly_income: float
+    monthly_income_net: float
+    monthly_income_gross_only: float
+    monthly_recurring_costs: float
+    monthly_subscriptions: float
+    monthly_insurance: float
+    monthly_vehicle_costs: float
+    monthly_loan_payments: float
+    monthly_total_expenses: float
+    monthly_net_cashflow: float
+    yearly_income: float
+    yearly_total_expenses: float
+    yearly_net_cashflow: float
+    asset_market_value: float
+    asset_liquid_value: float
+    loan_balance_total: float
+    net_worth_estimate: float
+    gross_income_only_entries: int
+    counts: Dict[str, int]
+
+
+class HousingScenarioEvaluationRead(BaseModel):
+    scenario_id: int
+    household_id: int
+    label: str
+    purchase_price: float
+    down_payment: float
+    mortgage_needed: float
+    monthly_interest: float
+    monthly_amortization: float
+    monthly_operating_cost: float
+    monthly_insurance: float
+    monthly_property_cost_estimate: float
+    monthly_total_cost: float
+    yearly_total_cost: float
+
+
+class ReportGenerateRequest(BaseModel):
+    type: str = Field(default="monthly_overview")
+    as_of_date: Optional[date] = None
+    assumption_json: Optional[Any] = None
+
+
+class ExtractionApplyRead(BaseModel):
+    draft_id: int
+    target_entity_type: str
+    target_entity_id: int
+    status: str
+
+
+class AssistantMessageRead(BaseModel):
+    role: str
+    content: str
+
+
+class AssistantPromptRequest(BaseModel):
+    prompt: str
+    conversation: list[AssistantMessageRead] | None = None
+
+
+class AssistantPromptResponse(BaseModel):
+    household_id: int
+    prompt: str
+    answer: str
