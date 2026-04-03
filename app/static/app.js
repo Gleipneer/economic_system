@@ -1495,10 +1495,12 @@ function renderDocumentUploadForm() {
         <div class="upload-drop">
           <input id="document_file" name="file" type="file" required />
         </div>
+        <p class="helper-text">Backend försöker extrahera text ur uppladdade PDF:er och dokument där det går. Bild- och screenshot-avläsning är förberedd i gränssnittet men inte implementerad ännu.</p>
       </div>
       <div class="field full">
-        <label for="document_extracted_text">Kort beskrivning</label>
+        <label for="document_extracted_text">Valfri notis</label>
         <textarea id="document_extracted_text" name="extracted_text" placeholder="Till exempel vad dokumentet gäller eller vilken period det avser."></textarea>
+        <p class="helper-text">Det här är bara en notis. När text kan extraheras ska den komma från filen, inte från en manuell tolkning här.</p>
       </div>
       <div class="field full">
         <div class="form-actions">
@@ -1820,10 +1822,17 @@ async function handlePageClick(event) {
   const clearIngestTarget = event.target.closest("[data-action='clear-ingest']");
   if (clearIngestTarget) {
     state.ui.ingestInput = "";
-    state.ui.ingestKind = "unknown";
+    state.ui.ingestKind = "text";
+    state.ui.ingestDocumentId = null;
     state.ui.ingestSourceName = "";
     state.ui.ingestResult = null;
     render();
+    return;
+  }
+
+  const analyzeDocumentTarget = event.target.closest("[data-action='analyze-document']");
+  if (analyzeDocumentTarget) {
+    await analyzeStoredDocument(Number(analyzeDocumentTarget.dataset.documentId));
     return;
   }
 
@@ -2093,11 +2102,12 @@ async function uploadDocument(form) {
   if (!selectedHousehold()) throw new Error("Välj hushåll först.");
   const formData = new FormData(form);
   formData.set("household_id", String(state.selectedHouseholdId));
-  await request("/documents/upload", { method: "POST", body: formData, headers: {} });
+  const document = await request("/documents/upload", { method: "POST", body: formData, headers: {} });
   form.reset();
   await refreshAllData();
   render();
-  showToast("Dokumentet laddades upp.");
+  const extraction = documentExtractionMeta(document.extraction_status);
+  showToast(`Dokumentet laddades upp. ${extraction.label}.`);
 }
 
 async function saveByMode(current, endpoint, payload) {
@@ -2220,7 +2230,8 @@ state.ui = {
   assistantInput: "",
   assistantPending: false,
   ingestInput: "",
-  ingestKind: "unknown",
+  ingestKind: "text",
+  ingestDocumentId: null,
   ingestSourceName: "",
   ingestPending: false,
   ingestPromoting: false,
@@ -2282,6 +2293,8 @@ function bindBaseEvents() {
     persistSelection();
     clearEdits();
     state.ui.assistantMessages = [];
+    state.ui.ingestInput = "";
+    state.ui.ingestDocumentId = null;
     state.ui.ingestResult = null;
     await ensureSummaryLoaded();
     render();
@@ -3026,29 +3039,260 @@ function renderHousingPageV2() {
 
 function ingestKindOptions() {
   return [
-    ["unknown", "Oklart underlag"],
-    ["bank_copy_paste", "Kontoutdrag / bank-copy-paste"],
-    ["subscription_contract", "Avtal eller abonnemangstext"],
-    ["invoice_or_bill", "Faktura eller räkning"],
-    ["financial_note", "Fri ekonomitext"],
+    ["text", "Klistrad text"],
+    ["pdf_text", "Klistrad text från PDF"],
+    ["image_placeholder", "Bild eller screenshot (förberett, ej klart)"],
   ];
+}
+
+function normalizeIngestResult(result) {
+  const documentSummary = result?.document_summary;
+  const safeKeys = Array.isArray(documentSummary?.confirmed_fields) ? documentSummary.confirmed_fields : [];
+  const safeFields = {};
+  const uncertainFields = {};
+  const summaryFactSource = {
+    provider_name: documentSummary?.provider_name,
+    title: documentSummary?.label,
+    amount: documentSummary?.amount,
+    currency: documentSummary?.currency,
+    due_date: documentSummary?.due_date,
+    cadence: documentSummary?.cadence,
+    category_hint: documentSummary?.category_hint,
+    household_relevance: documentSummary?.household_relevance,
+  };
+
+  Object.entries(summaryFactSource).forEach(([key, value]) => {
+    if (value === null || value === undefined || String(value).trim() === "") return;
+    if (safeKeys.includes(key)) {
+      safeFields[key] = value;
+    } else {
+      uncertainFields[key] = value;
+    }
+  });
+
+  if (Array.isArray(documentSummary?.notes) && documentSummary.notes.length) {
+    uncertainFields.notes = documentSummary.notes;
+  }
+
+  const suggestions = Array.isArray(result?.suggestions) ? result.suggestions : [];
+  const inferredRecommendation = documentSummary?.suggested_target_entity_type
+    || {
+      subscription_contract: "subscription_contract",
+      recurring_cost_candidate: "recurring_cost",
+      invoice: "document",
+      financial_note: "document",
+      unclear: "unclear",
+    }[documentSummary?.document_type || "unclear"]
+    || "unclear";
+  return {
+    inputKind: result?.source_channel || result?.input_kind || "text",
+    inputDetails: result?.input_details || {},
+    documentId: result?.document_id || result?.input_details?.document_id || null,
+    documentType: documentSummary?.document_type || result?.detected_kind || "unclear",
+    recommendation: inferredRecommendation,
+    summary: result?.summary || result?.analysis_summary || result?.overview || "Ingen sammanfattning finns ännu.",
+    confidence: documentSummary?.confidence ?? result?.confidence ?? null,
+    rawSource: result?.input_details?.source_name || result?.source_name || null,
+    providerName: documentSummary?.provider_name || null,
+    title: documentSummary?.label || null,
+    amount: documentSummary?.amount ?? null,
+    currency: documentSummary?.currency || null,
+    dueDate: documentSummary?.due_date || null,
+    cadence: documentSummary?.cadence || null,
+    householdRelevance: documentSummary?.household_relevance || null,
+    notes: documentSummary?.notes || null,
+    safeFields,
+    uncertainFields,
+    uncertaintyReasons: documentSummary?.uncertainty_reasons || [],
+    guidance: result?.guidance || result?.review_notes || [],
+    reviewGroups: Array.isArray(result?.review_groups) ? result.review_groups : [],
+    suggestions,
+    model: result?.model || null,
+    provider: result?.provider || null,
+    usage: result?.usage || null,
+    futureImageReadiness: result?.future_image_readiness || null,
+  };
+}
+
+function formatIngestAmount(value, currency) {
+  if (value === null || value === undefined || value === "") return "Ej angivet";
+  const amount = Number(value);
+  if (Number.isNaN(amount)) return `${value}${currency ? ` ${currency}` : ""}`;
+  const formatted = new Intl.NumberFormat("sv-SE", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(amount);
+  return currency ? `${formatted} ${currency}` : formatted;
+}
+
+function renderIngestFactGrid(review) {
+  const facts = [
+    ["Leverantör", review.providerName],
+    ["Titel", review.title],
+    ["Belopp", formatIngestAmount(review.amount, review.currency)],
+    ["Förfallodatum", review.dueDate ? dateLabel(review.dueDate) : null],
+    ["Frekvens", review.cadence],
+    ["Hushållsrelevans", review.householdRelevance],
+    ["Anteckning", review.notes],
+  ].filter(([, value]) => value !== null && value !== undefined && String(value).trim() !== "");
+
+  if (!facts.length) {
+    return `<div class="empty-state compact"><p>Inga säkra kärnfakta gick att extrahera. Det är bättre än att gissa.</p></div>`;
+  }
+
+  return `
+    <div class="detail-grid three fact-grid">
+      ${facts.map(([label, value]) => detailCell(label, value)).join("")}
+    </div>
+  `;
+}
+
+function renderIngestPipelineStrip() {
+  return `
+    <section class="record-grid four workflow-pipeline">
+      <article class="workflow-step-card">
+        <span class="badge info">1. Rå input</span>
+        <h4>Klistra in text eller ladda upp underlag</h4>
+        <p class="muted">Text, PDF-text eller uppladdade dokument ska kunna bli ingång till samma reviewflöde.</p>
+      </article>
+      <article class="workflow-step-card">
+        <span class="badge info">2. Extraktion</span>
+        <h4>Text normaliseras innan AI</h4>
+        <p class="muted">När text går att extrahera ska den synas som workflow-data, inte som kanonisk sanning.</p>
+      </article>
+      <article class="workflow-step-card">
+        <span class="badge info">3. AI-review</span>
+        <h4>Klassificera och markera osäkerhet</h4>
+        <p class="muted">Modellen ska visa vad som är säkert, vad som är tveksamt och vart underlaget pekar.</p>
+      </article>
+      <article class="workflow-step-card">
+        <span class="badge info">4. Promote</span>
+        <h4>Skapa reviewutkast explicit</h4>
+        <p class="muted">Promote är ett separat steg. Det får inte skriva tyst till hushållets kanoniska data.</p>
+      </article>
+    </section>
+  `;
+}
+
+function renderIngestFutureImagePlaceholder() {
+  return `
+    <article class="workflow-callout future-readiness">
+      <div class="record-title-row">
+        <div>
+          <h4 class="record-title">Bild- och screenshot-avläsning</h4>
+          <p class="muted">Kontraktet finns här, men OCR/screenshot-tolkning är inte implementerad eller verifierad ännu.</p>
+        </div>
+        <span class="badge muted">Ej klar</span>
+      </div>
+      <p class="muted">När den delen byggs ska den kopplas hit som en separat extractor. Tills dess är den här ytan bara en tydlig plats i flödet.</p>
+      <button class="ghost compact" type="button" disabled>Kommer senare</button>
+    </article>
+  `;
+}
+
+function labelizeIngestKey(key) {
+  return String(key || "")
+    .replaceAll("_", " ")
+    .replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function formatIngestSummaryValue(value) {
+  if (Array.isArray(value)) {
+    return value.map((item) => formatIngestSummaryValue(item)).join(" · ");
+  }
+  if (value && typeof value === "object") {
+    return JSON.stringify(value);
+  }
+  return value == null ? "" : String(value);
+}
+
+function renderIngestSummaryBlock(value, fallbackText) {
+  if (!value || (typeof value === "object" && !Array.isArray(value) && !Object.keys(value).length)) {
+    return `<p class="muted">${escapeHtml(fallbackText)}</p>`;
+  }
+
+  if (Array.isArray(value)) {
+    return `<ul class="summary-list">${value.map((item) => `<li>${escapeHtml(formatIngestSummaryValue(item))}</li>`).join("")}</ul>`;
+  }
+
+  if (typeof value === "object") {
+    const entries = Object.entries(value).filter(([, item]) => item !== null && item !== undefined && String(formatIngestSummaryValue(item)).trim() !== "");
+    if (!entries.length) {
+      return `<p class="muted">${escapeHtml(fallbackText)}</p>`;
+    }
+    return `
+      <div class="detail-grid three fact-grid">
+        ${entries.map(([key, item]) => detailCell(labelizeIngestKey(key), formatIngestSummaryValue(item))).join("")}
+      </div>
+    `;
+  }
+
+  return `<p class="muted">${escapeHtml(formatIngestSummaryValue(value))}</p>`;
+}
+
+function ingestSourceChannelLabel(value) {
+  return {
+    text: "Klistrad text",
+    pdf_text: "Klistrad PDF-text",
+    uploaded_document: "Uppladdat dokument",
+    uploaded_pdf: "Uppladdad PDF",
+    image_placeholder: "Bild eller screenshot",
+  }[value] || "Okänd källa";
+}
+
+function documentExtractionMeta(status) {
+  return {
+    parsed: { tone: "success", label: "Text extraherad" },
+    ocr_pending: { tone: "warning", label: "OCR krävs" },
+    parse_failed: { tone: "warning", label: "Text kunde inte läsas" },
+    unsupported: { tone: "warning", label: "Filtypen stöds inte" },
+    pending: { tone: "warning", label: "Ingen text ännu" },
+    reviewed: { tone: "success", label: "Granskad" },
+  }[status || "pending"] || { tone: "muted", label: status || "pending" };
+}
+
+function groupIngestSuggestions(suggestions) {
+  const groups = new Map();
+  suggestions.forEach((item) => {
+    const bucket = item.review_bucket || item.recommended_direction || item.suggested_path || item.target_entity_type || item.document_type || "unclear";
+    if (!groups.has(bucket)) {
+      groups.set(bucket, []);
+    }
+    groups.get(bucket).push(item);
+  });
+  return Array.from(groups.entries()).map(([bucket, items]) => ({ bucket, items }));
 }
 
 function renderIngestSuggestionCard(item) {
   const confidence = item.confidence == null ? "Ej angiven" : number(item.confidence, 2);
+  const documentType = item.document_type || item.detected_kind || item.classification || "unclear";
+  const direction = item.recommended_direction || item.review_bucket || item.suggested_path || item.target_entity_type || "unclear";
+  const uncertainty = item.uncertainty_reasons || item.uncertainty_notes || [];
+  const fields = item.document_summary || item.extracted_fields || item.fields || item.core_facts || {};
   return `
     <article class="record-card">
       <div class="record-title-row">
         <div>
-          <h4 class="record-title">${escapeHtml(item.title)}</h4>
-          <p class="muted">${escapeHtml(item.target_entity_type)} · confidence ${escapeHtml(confidence)}</p>
+          <h4 class="record-title">${escapeHtml(item.title || item.provider_name || item.target_entity_type || "Förslag")}</h4>
+          <p class="muted">${escapeHtml(documentType)} · ${escapeHtml(direction)} · confidence ${escapeHtml(confidence)}</p>
         </div>
         <span class="badge ${item.validation_status === "valid" ? "success" : "warning"}">${escapeHtml(item.validation_status)}</span>
       </div>
-      <p class="muted">${escapeHtml(item.rationale)}</p>
-      ${item.uncertainty_notes?.length ? `<p class="muted">Osäkerhet: ${escapeHtml(item.uncertainty_notes.join(" · "))}</p>` : ""}
+      <div class="detail-grid three fact-grid">
+        ${fields.provider_name || item.provider_name ? detailCell("Leverantör", fields.provider_name || item.provider_name) : ""}
+        ${fields.title || item.title ? detailCell("Titel", fields.title || item.title) : ""}
+        ${(fields.amount ?? item.amount) !== undefined && (fields.amount ?? item.amount) !== null ? detailCell("Belopp", formatIngestAmount(fields.amount ?? item.amount, fields.currency || item.currency)) : ""}
+        ${fields.due_date || item.due_date ? detailCell("Förfallodatum", dateLabel(fields.due_date || item.due_date)) : ""}
+        ${fields.cadence || item.cadence ? detailCell("Frekvens", fields.cadence || item.cadence) : ""}
+        ${fields.household_relevance || item.household_relevance ? detailCell("Hushållsrelevans", fields.household_relevance || item.household_relevance) : ""}
+      </div>
+      <p class="muted">${escapeHtml(item.rationale || item.summary || "Ingen rationale angiven.")}</p>
+      ${uncertainty?.length ? `<p class="muted">Osäkerhet: ${escapeHtml(uncertainty.join(" · "))}</p>` : ""}
       ${item.validation_errors?.length ? `<p class="muted">Validering: ${escapeHtml(item.validation_errors.join(" · "))}</p>` : ""}
-      <pre>${escapeHtml(JSON.stringify(item.proposed_json, null, 2))}</pre>
+      <details class="raw-json">
+        <summary>Visa strukturerad payload</summary>
+        <pre>${escapeHtml(JSON.stringify(item.proposed_json, null, 2))}</pre>
+      </details>
     </article>
   `;
 }
@@ -3056,21 +3300,92 @@ function renderIngestSuggestionCard(item) {
 function renderIngestResult() {
   const result = state.ui.ingestResult;
   if (!result) {
-    return `<div class="empty-state"><p>Ingen AI-analys körd ännu. Klistra in underlag och kör analys när ni vill skapa reviewutkast utan tysta databasskrivningar.</p></div>`;
+    return `<div class="empty-state"><p>Ingen AI-analys körd ännu. Klistra in underlag eller ladda in extraherad text från ett dokument och kör analys när du vill skapa reviewutkast utan tysta databasskrivningar.</p></div>`;
   }
 
-  const validSuggestions = result.suggestions.filter((item) => item.validation_status === "valid");
+  const review = normalizeIngestResult(result);
+  const validSuggestions = review.suggestions.filter((item) => item.validation_status === "valid");
+  const suggestionGroups = review.reviewGroups.length
+    ? review.reviewGroups.map((group) => ({ bucket: group.group_type, title: group.title, summary: group.summary, items: group.suggestions || [] }))
+    : groupIngestSuggestions(review.suggestions);
+  const rawPreview = (state.ui.ingestInput || "").trim();
+  const rawPreviewText = rawPreview.length > 1200 ? `${rawPreview.slice(0, 1200)}...` : rawPreview;
   return `
-    <div class="record-grid">
+    <div class="workflow-stack">
       <article class="record-card">
         <div class="record-title-row">
           <div>
-            <h4 class="record-title">${escapeHtml(result.summary)}</h4>
-            <p class="muted">${escapeHtml(result.detected_kind)} · ${escapeHtml(result.provider)} · ${escapeHtml(result.model)}</p>
+            <h4 class="record-title">${escapeHtml(review.summary)}</h4>
+            <p class="muted">${escapeHtml(review.documentType)} · ${escapeHtml(ingestSourceChannelLabel(review.inputKind))}${review.provider ? ` · ${escapeHtml(review.provider)}` : ""}${review.model ? ` · ${escapeHtml(review.model)}` : ""}</p>
           </div>
-          <span class="badge">${result.usage?.total_tokens ? `${result.usage.total_tokens} tokens` : "utan usage"}</span>
+          <span class="badge">${review.usage?.total_tokens ? `${review.usage.total_tokens} tokens` : "utan usage"}</span>
         </div>
-        ${result.guidance?.length ? `<p class="muted">${escapeHtml(result.guidance.join(" · "))}</p>` : ""}
+        <div class="badge-row">
+          <span class="badge info">Klass: ${escapeHtml(review.documentType)}</span>
+          <span class="badge muted">Riktning: ${escapeHtml(review.recommendation)}</span>
+          <span class="badge ${review.confidence == null ? "muted" : "success"}">Confidence ${review.confidence == null ? "ej angiven" : escapeHtml(number(review.confidence, 2))}</span>
+        </div>
+        <p class="muted">${escapeHtml(review.summary)}</p>
+        ${review.guidance?.length ? `<p class="muted">${escapeHtml(review.guidance.join(" · "))}</p>` : ""}
+        <div class="workflow-callout">
+          <strong>AI-tolkningen är inte kanonisk data.</strong>
+          <p class="muted">Promote skapar bara dokument- och reviewutkast. Inget skrivs tyst till hushållets slutgiltiga poster.</p>
+        </div>
+      </article>
+      <article class="record-card">
+        <div class="record-title-row">
+          <div>
+            <h4 class="record-title">Rå input</h4>
+            <p class="muted">Det här är källtexten eller dokumenttexten som AI:n fick jobba med.</p>
+          </div>
+          <span class="badge muted">${escapeHtml(ingestSourceChannelLabel(review.inputKind))}</span>
+        </div>
+        <div class="detail-grid three fact-grid">
+          ${detailCell("Källa", review.rawSource || "Ej angiven")}
+          ${detailCell("Dokument", review.documentId ? `#${review.documentId}` : "Ingen")}
+          ${detailCell("Textlängd", review.inputDetails?.text_length ? `${review.inputDetails.text_length} tecken` : "Ej angiven")}
+          ${detailCell("Extraktion", review.inputDetails?.extraction_mode || "manuell")}
+          ${detailCell("Fil", review.inputDetails?.document_file_name || "Ingen fil")}
+          ${detailCell("Trunkerad", review.inputDetails?.text_truncated ? "Ja" : "Nej")}
+        </div>
+        ${review.inputDetails?.extraction_notes?.length ? `<p class="muted">${escapeHtml(review.inputDetails.extraction_notes.join(" · "))}</p>` : ""}
+        ${rawPreviewText ? `<pre class="raw-preview">${escapeHtml(rawPreviewText)}</pre>` : `<div class="empty-state compact"><p>Ingen råtext finns i vyn just nu.</p></div>`}
+      </article>
+      <article class="record-card">
+        <div class="record-title-row">
+          <div>
+            <h4 class="record-title">Document summary</h4>
+            <p class="muted">Säkra kärnfält visas separat från osäkra.</p>
+          </div>
+        </div>
+        <div class="summary-panels">
+          <article class="workflow-callout subtle">
+            <strong>Säkra kärnfält</strong>
+            ${renderIngestSummaryBlock(review.safeFields || {
+              provider_name: review.providerName,
+              title: review.title,
+              amount: review.amount,
+              currency: review.currency,
+              due_date: review.dueDate,
+              cadence: review.cadence,
+              household_relevance: review.householdRelevance,
+              notes: review.notes,
+            }, "Inga säkra kärnfält gick att extrahera.")}
+          </article>
+          <article class="workflow-callout subtle">
+            <strong>Osäkra kärnfält</strong>
+            ${renderIngestSummaryBlock(review.uncertainFields || review.uncertaintyReasons, "Inga osäkra kärnfält angavs.")}
+          </article>
+        </div>
+      </article>
+      <article class="record-card">
+        <div class="record-title-row">
+          <div>
+            <h4 class="record-title">Osäkerhet</h4>
+            <p class="muted">Det som modellen inte vet säkert ska synas tydligt.</p>
+          </div>
+        </div>
+        ${review.uncertaintyReasons?.length ? `<ul class="summary-list">${review.uncertaintyReasons.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>` : `<div class="empty-state compact"><p>Ingen osäkerhet angavs, men granska ändå innan promote.</p></div>`}
         <div class="actions-row">
           <button class="primary" type="button" data-action="promote-ingest" ${validSuggestions.length ? "" : "disabled"}>
             ${state.ui.ingestPromoting ? "Skapar utkast..." : "Skapa reviewutkast"}
@@ -3078,7 +3393,29 @@ function renderIngestResult() {
           <span class="chat-disclaimer">Detta skapar bara reviewutkast i workflow-lagret. Inget skrivs direkt till kanonisk ekonomi.</span>
         </div>
       </article>
-      ${result.suggestions.map((item) => renderIngestSuggestionCard(item)).join("") || `<div class="empty-state"><p>Inga säkra strukturerade förslag hittades i underlaget.</p></div>`}
+      <article class="record-card">
+        <div class="record-title-row">
+          <div>
+            <h4 class="record-title">Reviewförslag</h4>
+            <p class="muted">Validerade förslag som kan promota vidare till workflow-utkast. Grupperade efter review_bucket när det finns.</p>
+          </div>
+          <span class="badge">${validSuggestions.length} validerade</span>
+        </div>
+        ${suggestionGroups.length ? suggestionGroups.map((group) => `
+          <section class="workflow-group">
+            <div class="record-title-row">
+              <div>
+                <h5 class="group-title">${escapeHtml(group.title || group.bucket)}</h5>
+                <p class="muted">${escapeHtml(group.summary || "")}${group.summary ? " · " : ""}${group.items.length} förslag</p>
+              </div>
+              <span class="badge muted">${group.items.filter((item) => item.validation_status === "valid").length} validerade</span>
+            </div>
+            <div class="record-grid">
+              ${group.items.map((item) => renderIngestSuggestionCard(item)).join("")}
+            </div>
+          </section>
+        `).join("") : `<div class="empty-state compact"><p>Inga säkra strukturerade förslag hittades i underlaget.</p></div>`}
+      </article>
     </div>
   `;
 }
@@ -3088,23 +3425,17 @@ function renderDocumentsPageV2() {
   const drafts = draftsForHousehold();
   return `
     <section class="page-wrap">
-      ${renderPageHeader("Dokument", "Ladda upp och hantera ekonomiska dokument")}
+      ${renderPageHeader("Dokument", "Ladda upp, extrahera och granska underlag utan att blanda ihop råinput och kanonisk data")}
+      ${renderIngestPipelineStrip()}
       <section class="split-layout">
         <article class="panel form-card">
-          <span class="section-eyebrow">Ladda upp dokument</span>
-          <h3>Avtal, kvitton, fakturor och låneavier</h3>
-          <div class="upload-box">
-            ${renderDocumentUploadForm()}
-          </div>
-        </article>
-        <article class="panel form-card">
-          <span class="section-eyebrow">Data-In AI</span>
-          <h3>Skapa konservativa reviewutkast från råtext</h3>
-          <p class="muted">Klistra in bankrader, avtalsvillkor eller annan råtext. AI:n klassificerar underlaget, föreslår strukturerade poster och kräver sedan ett separat promote-steg innan reviewutkast skapas.</p>
+          <span class="section-eyebrow">Rå input</span>
+          <h3>Klistra in text eller peka ut ett dokument</h3>
+          <p class="muted">Välj underlagstyp, klistra in text från faktura eller avtal, eller ladda upp en PDF/dokumentfil för extraktion i workflow-lagret.</p>
           <form id="ingestAnalyzeForm" class="form-grid">
-            ${renderField({ key: "ingest_input_kind", label: "Typ av underlag", type: "select", options: ingestKindOptions(), required: true }, state.ui.ingestKind || "unknown")}
+            ${renderField({ key: "ingest_input_kind", label: "Underlagstyp", type: "select", options: ingestKindOptions(), required: true }, state.ui.ingestKind || "text")}
             ${renderField({ key: "ingest_source_name", label: "Källa eller avsändare", type: "text" }, state.ui.ingestSourceName || "")}
-            ${renderField({ key: "ingest_input_text", label: "Råtext", type: "textarea", full: true, required: true }, state.ui.ingestInput || "")}
+            ${renderField({ key: "ingest_input_text", label: "Råtext", type: "textarea", full: true, required: true, placeholder: "Klistra in text från faktura, abonnemang eller PDF här." }, state.ui.ingestInput || "")}
             <div class="field full">
               <div class="form-actions">
                 <button class="primary" type="submit" ${selectedHousehold() ? "" : "disabled"}>${state.ui.ingestPending ? "Analyserar..." : "Analysera underlag"}</button>
@@ -3112,24 +3443,35 @@ function renderDocumentsPageV2() {
               </div>
             </div>
           </form>
+          <div class="workflow-callout">
+            <strong>Uppladdade dokument kan också användas som input.</strong>
+            <p class="muted">Om dokumentet redan finns i listan nedan och har extraherad text kan du skicka texten direkt tillbaka till Data-In.</p>
+          </div>
+          <div class="upload-box">
+            ${renderDocumentUploadForm()}
+          </div>
+          ${renderIngestFutureImagePlaceholder()}
+        </article>
+        <article class="panel form-card">
+          <span class="section-eyebrow">AI-review</span>
+          <h3>Det som är säkert, tveksamt och nästa riktning</h3>
+          <p class="muted">Här ska du se vad modellen tror, varför den tror det, och vad som fortfarande är osäkert innan du promtar vidare.</p>
+        ${renderIngestResult()}
         </article>
       </section>
-      <article class="panel">
-        <span class="section-eyebrow">AI-resultat</span>
-        <h3>Förslag som kan bli reviewutkast</h3>
-        ${renderIngestResult()}
-      </article>
       <section class="split-layout">
         <article class="panel">
-          <span class="section-eyebrow">Alla dokument</span>
+          <span class="section-eyebrow">Uppladdade dokument</span>
           <h3>${items.length ? `${items.length} dokument` : "Inga dokument ännu"}</h3>
+          <p class="muted">När extraherad text finns kan du flytta den direkt in i Data-In utan att blanda ihop filen med analysen.</p>
           <div class="record-grid">
             ${items.map((item) => renderDocumentRowV2(item)).join("") || `<div class="empty-state"><p>Inga dokument uppladdade ännu.</p></div>`}
           </div>
         </article>
         <article class="panel">
-          <span class="section-eyebrow">Reviewutkast</span>
+          <span class="section-eyebrow">Workflow-utkast</span>
           <h3>${drafts.length ? `${drafts.length} utkast att granska` : "Inga utkast att granska"}</h3>
+          <p class="muted">Det här är inte kanoniska hushållsposter. Det är reviewobjekt som fortfarande kräver explicit apply senare.</p>
           <div class="record-grid">
             ${drafts.map((draft) => `
               <article class="record-card">
@@ -3154,6 +3496,8 @@ function renderDocumentsPageV2() {
 }
 
 function renderDocumentRowV2(item) {
+  const snippet = item.extracted_text ? item.extracted_text.trim().slice(0, 180) : "";
+  const extraction = documentExtractionMeta(item.extraction_status);
   return `
     <article class="record-card">
       <div class="record-title-row">
@@ -3162,10 +3506,12 @@ function renderDocumentRowV2(item) {
           <p class="muted">${escapeHtml(optionLabel(OPTIONS.documentType, item.document_type))}${item.issuer ? ` · ${escapeHtml(item.issuer)}` : ""}</p>
         </div>
         <div class="actions-row">
-          <span class="badge ${item.extraction_status === "pending" ? "warning" : "success"}">${escapeHtml(item.extraction_status || "pending")}</span>
+          <span class="badge ${escapeHtml(extraction.tone)}">${escapeHtml(extraction.label)}</span>
           <a class="ghost compact" href="/documents/${item.id}/download">Ladda ned</a>
+          <button class="primary compact" type="button" data-action="analyze-document" data-document-id="${item.id}" ${item.extracted_text ? "" : "disabled"}>Analysera text</button>
         </div>
       </div>
+      ${snippet ? `<p class="muted">${escapeHtml(snippet)}${item.extracted_text && item.extracted_text.trim().length > 180 ? "..." : ""}</p>` : `<p class="muted">Ingen extraherad text ännu. Dokument som kräver OCR markeras tydligt men OCR är ännu inte implementerad.</p>`}
     </article>
   `;
 }
@@ -3556,10 +3902,17 @@ async function handlePageClick(event) {
   const clearIngestTarget = event.target.closest("[data-action='clear-ingest']");
   if (clearIngestTarget) {
     state.ui.ingestInput = "";
-    state.ui.ingestKind = "unknown";
+    state.ui.ingestKind = "text";
+    state.ui.ingestDocumentId = null;
     state.ui.ingestSourceName = "";
     state.ui.ingestResult = null;
     render();
+    return;
+  }
+
+  const analyzeDocumentTarget = event.target.closest("[data-action='analyze-document']");
+  if (analyzeDocumentTarget) {
+    await analyzeStoredDocument(Number(analyzeDocumentTarget.dataset.documentId));
     return;
   }
 
@@ -3724,10 +4077,43 @@ async function generateReportSnapshot(form) {
   showToast("Rapporten genererades.");
 }
 
+async function analyzeStoredDocument(documentId) {
+  if (!selectedHousehold()) throw new Error("Välj hushåll först.");
+  const document = state.data.documents.find((item) => item.id === documentId);
+  if (!document?.extracted_text) {
+    throw new Error("Dokumentet saknar extraherad text. OCR för bild/screenshot är inte implementerad ännu.");
+  }
+  const sourceChannel = (document.mime_type || "").toLowerCase() === "application/pdf" ? "uploaded_pdf" : "uploaded_document";
+  state.ui.ingestPending = true;
+  state.ui.ingestResult = null;
+  render();
+  try {
+    const response = await request(`/households/${state.selectedHouseholdId}${API.ingestAnalyze}`, {
+      method: "POST",
+      body: JSON.stringify({
+        document_id: documentId,
+        input_kind: sourceChannel,
+        source_channel: sourceChannel,
+        source_name: document.issuer || document.file_name || null,
+      }),
+    });
+    state.ui.ingestDocumentId = documentId;
+    state.ui.ingestKind = sourceChannel;
+    state.ui.ingestSourceName = document.issuer || document.file_name || "";
+    state.ui.ingestInput = document.extracted_text;
+    state.ui.ingestResult = response;
+    showToast("Dokumenttexten analyserades i Data-In.");
+  } finally {
+    state.ui.ingestPending = false;
+    render();
+  }
+}
+
 async function analyzeIngestForm(form) {
   if (!selectedHousehold()) throw new Error("Välj hushåll först.");
   const inputText = form.elements.ingest_input_text.value.trim();
   if (!inputText) throw new Error("Klistra in råtext innan du kör AI-analysen.");
+  const inputKind = form.elements.ingest_input_kind.value;
   state.ui.ingestPending = true;
   state.ui.ingestResult = null;
   render();
@@ -3736,11 +4122,13 @@ async function analyzeIngestForm(form) {
       method: "POST",
       body: JSON.stringify({
         input_text: inputText,
-        input_kind: form.elements.ingest_input_kind.value,
+        input_kind: inputKind,
+        source_channel: inputKind,
         source_name: form.elements.ingest_source_name.value.trim() || null,
       }),
     });
-    state.ui.ingestKind = form.elements.ingest_input_kind.value;
+    state.ui.ingestDocumentId = null;
+    state.ui.ingestKind = inputKind;
     state.ui.ingestSourceName = form.elements.ingest_source_name.value.trim();
     state.ui.ingestInput = inputText;
     state.ui.ingestResult = response;
@@ -3757,20 +4145,26 @@ async function promoteIngestSuggestions() {
   state.ui.ingestPromoting = true;
   render();
   try {
+    const ingestResult = normalizeIngestResult(state.ui.ingestResult);
     const response = await request(`/households/${state.selectedHouseholdId}${API.ingestPromote}`, {
       method: "POST",
       body: JSON.stringify({
         input_text: state.ui.ingestInput,
         input_kind: state.ui.ingestKind,
+        source_channel: state.ui.ingestKind,
+        document_id: state.ui.ingestDocumentId,
         source_name: state.ui.ingestSourceName || null,
-        provider: state.ui.ingestResult.provider,
-        model: state.ui.ingestResult.model,
-        suggestions: state.ui.ingestResult.suggestions,
+        provider: ingestResult.provider,
+        model: ingestResult.model,
+        detected_kind: ingestResult.documentType,
+        document_summary: state.ui.ingestResult.document_summary || null,
+        suggestions: ingestResult.suggestions,
       }),
     });
     await refreshAllData();
     state.ui.ingestResult = null;
     state.ui.ingestInput = "";
+    state.ui.ingestDocumentId = null;
     showToast(`Skapade ${response.created_drafts.length} reviewutkast.`);
   } finally {
     state.ui.ingestPromoting = false;

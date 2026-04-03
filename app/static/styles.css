@@ -322,6 +322,107 @@ button {
   gap: 12px;
 }
 
+.workflow-stack {
+  display: grid;
+  gap: 14px;
+}
+
+.workflow-pipeline {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.workflow-step-card {
+  padding: 18px;
+  border-radius: var(--radius-xl);
+  border: 1px solid var(--border-soft);
+  background: rgba(255, 255, 255, 0.48);
+  box-shadow: var(--shadow-card);
+  display: grid;
+  gap: 8px;
+}
+
+.workflow-step-card h4,
+.group-title {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 700;
+}
+
+.workflow-callout {
+  display: grid;
+  gap: 8px;
+  padding: 16px;
+  border-radius: 18px;
+  border: 1px solid rgba(111, 148, 141, 0.15);
+  background: rgba(111, 148, 141, 0.06);
+}
+
+.workflow-callout.subtle {
+  background: rgba(255, 255, 255, 0.38);
+}
+
+.workflow-callout.future-readiness {
+  margin-top: 4px;
+}
+
+.workflow-group {
+  display: grid;
+  gap: 12px;
+  padding: 14px 0 4px;
+  border-top: 1px solid var(--border-soft);
+}
+
+.workflow-group:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.summary-panels {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.summary-list {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--foreground);
+  line-height: 1.6;
+}
+
+.summary-list li + li {
+  margin-top: 8px;
+}
+
+.raw-json {
+  display: grid;
+  gap: 10px;
+}
+
+.raw-json summary {
+  cursor: pointer;
+  color: var(--primary);
+  font-weight: 700;
+}
+
+.raw-preview,
+.raw-json pre {
+  margin: 0;
+  padding: 14px;
+  border-radius: 14px;
+  border: 1px solid var(--border-soft);
+  background: rgba(255, 255, 255, 0.5);
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Consolas, monospace;
+  font-size: 0.86rem;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.fact-grid {
+  margin-top: 2px;
+}
+
 .record-title-row {
   display: flex;
   align-items: flex-start;
@@ -739,7 +840,8 @@ textarea {
   .detail-grid.four,
   .record-grid.three,
   .hero-grid,
-  .split-layout {
+  .split-layout,
+  .workflow-pipeline {
     grid-template-columns: 1fr;
   }
 
@@ -747,6 +849,10 @@ textarea {
   .record-grid.two,
   .detail-grid.three {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .summary-panels {
+    grid-template-columns: 1fr;
   }
 }
 
