@@ -15,7 +15,7 @@ responses by composing nested schemas explicitly.
 
 from datetime import date, datetime
 from typing import Optional, List, Any, Dict, Literal
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, confloat, root_validator
 
 from .models import IncomeFrequency, LoanRepaymentModel, VariabilityClass, Controllability, SubscriptionCategory
 
@@ -771,47 +771,121 @@ class AssistantPromptResponse(BaseModel):
 
 class IngestSuggestionRead(BaseModel):
     target_entity_type: Literal["recurring_cost", "subscription_contract", "loan", "income_source"]
+    review_bucket: Literal["recurring_cost", "subscription_contract", "loan", "income_source", "unclear"] = "unclear"
     title: str
     rationale: str
-    confidence: Optional[float] = None
+    confidence: Optional[confloat(ge=0.0, le=1.0)] = None
     proposed_json: Dict[str, Any]
     validation_status: Literal["valid", "invalid"] = "valid"
     validation_errors: List[str] = Field(default_factory=list)
     uncertainty_notes: List[str] = Field(default_factory=list)
 
 
-class IngestAnalyzeRequest(BaseModel):
-    input_text: str
-    input_kind: Optional[str] = Field(default="unknown")
+class IngestFutureImageReadinessRead(BaseModel):
+    supported: bool = False
+    status: Literal["not_implemented", "planned"] = "not_implemented"
+    note: str = "Bild- och screenshotavläsning är inte implementerad ännu."
+
+
+class IngestInputRead(BaseModel):
+    source_channel: Literal["text", "pdf_text", "uploaded_document", "uploaded_pdf", "image_placeholder"]
+    input_origin: Literal["user_paste", "document_text", "file_text", "pdf_text", "future_image_placeholder"]
+    document_id: Optional[int] = None
+    document_file_name: Optional[str] = None
     source_name: Optional[str] = None
+    text_length: int
+    text_truncated: bool = False
+    extraction_mode: str
+    extraction_notes: List[str] = Field(default_factory=list)
+
+
+class IngestDocumentSummaryRead(BaseModel):
+    document_type: Literal["subscription_contract", "invoice", "recurring_cost_candidate", "financial_note", "unclear"]
+    provider_name: Optional[str] = None
+    label: Optional[str] = None
+    amount: Optional[float] = None
+    currency: Optional[str] = None
+    due_date: Optional[date] = None
+    cadence: Optional[str] = None
+    category_hint: Optional[str] = None
+    suggested_target_entity_type: Optional[Literal["recurring_cost", "subscription_contract", "loan", "income_source"]] = None
+    household_relevance: Literal["low", "medium", "high"] = "medium"
+    confidence: Optional[confloat(ge=0.0, le=1.0)] = None
+    confirmed_fields: List[str] = Field(default_factory=list)
+    notes: List[str] = Field(default_factory=list)
+    uncertainty_reasons: List[str] = Field(default_factory=list)
+
+
+class IngestReviewGroupRead(BaseModel):
+    group_type: Literal["subscription_contract", "recurring_cost", "loan", "income_source", "unclear"]
+    title: str
+    summary: str
+    confidence: Optional[confloat(ge=0.0, le=1.0)] = None
+    suggestion_count: int
+    uncertainty_reasons: List[str] = Field(default_factory=list)
+    suggestions: List[IngestSuggestionRead] = Field(default_factory=list)
+
+
+class IngestAnalyzeRequest(BaseModel):
+    input_text: Optional[str] = None
+    input_kind: Optional[str] = Field(default="unknown")
+    source_channel: Literal["text", "pdf_text", "uploaded_document", "uploaded_pdf", "image_placeholder"] = "text"
+    document_id: Optional[int] = None
+    source_name: Optional[str] = None
+
+    @root_validator(allow_reuse=True)
+    def validate_input_source(cls, values):
+        input_text = values.get("input_text")
+        document_id = values.get("document_id")
+        if not (input_text and input_text.strip()) and document_id is None:
+            raise ValueError("Skicka input_text eller document_id till Data-In analyze.")
+        return values
 
 
 class IngestAnalyzeResponse(BaseModel):
     household_id: int
     source_name: Optional[str] = None
     input_kind: str
+    source_channel: Literal["text", "pdf_text", "uploaded_document", "uploaded_pdf", "image_placeholder"] = "text"
+    document_id: Optional[int] = None
+    input_details: IngestInputRead
     detected_kind: str
+    document_summary: IngestDocumentSummaryRead
+    review_groups: List[IngestReviewGroupRead] = Field(default_factory=list)
     summary: str
     guidance: List[str] = Field(default_factory=list)
     suggestions: List[IngestSuggestionRead] = Field(default_factory=list)
+    future_image_readiness: IngestFutureImageReadinessRead = Field(default_factory=IngestFutureImageReadinessRead)
     provider: str
     model: str
     usage: Optional[AIUsageRead] = None
 
 
 class IngestPromoteRequest(BaseModel):
-    input_text: str
+    input_text: Optional[str] = None
     input_kind: Optional[str] = Field(default="unknown")
+    source_channel: Literal["text", "pdf_text", "uploaded_document", "uploaded_pdf", "image_placeholder"] = "text"
+    document_id: Optional[int] = None
     source_name: Optional[str] = None
     provider: Optional[str] = None
     model: Optional[str] = None
+    detected_kind: Optional[str] = None
+    document_summary: Optional[IngestDocumentSummaryRead] = None
     suggestions: List[IngestSuggestionRead] = Field(default_factory=list)
+
+    @root_validator(allow_reuse=True)
+    def validate_promote_source(cls, values):
+        input_text = values.get("input_text")
+        document_id = values.get("document_id")
+        if not (input_text and input_text.strip()) and document_id is None:
+            raise ValueError("Skicka input_text eller document_id till Data-In promote.")
+        return values
 
 
 class CreatedDraftRead(BaseModel):
     draft_id: int
     target_entity_type: str
-    confidence: Optional[float] = None
+    confidence: Optional[confloat(ge=0.0, le=1.0)] = None
     validation_status: str
 
 

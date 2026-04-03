@@ -3,6 +3,7 @@ import io
 import os
 import subprocess
 import sys
+from datetime import date
 
 import pytest
 from fastapi.testclient import TestClient
@@ -338,6 +339,8 @@ def test_summary_document_scenario_and_report_flow(tmp_path):
         )
         assert upload.status_code == 201
         document_id = upload.json()["id"]
+        assert upload.json()["extracted_text"] == "resurs invoice"
+        assert upload.json()["extraction_status"] == "parsed"
 
         download = client.get(f"/documents/{document_id}/download")
         assert download.status_code == 200
@@ -409,3 +412,279 @@ def test_ai_routes_fail_cleanly_without_provider(tmp_path):
         )
         assert ingest.status_code == 503
         assert "OPENAI_API_KEY" in ingest.json()["detail"]
+
+
+def test_extract_text_from_upload_handles_text_and_pdf_branches(monkeypatch):
+    from app.ingest_content import extract_text_from_upload
+
+    text_result = extract_text_from_upload(b"  Rad 1\nRad 2  ", file_name="note.txt", mime_type="text/plain")
+    assert text_result.text == "Rad 1\nRad 2"
+    assert text_result.extraction_mode == "text_file"
+
+    class FakePage:
+        def extract_text(self):
+            return "  Faktura april\n  Resurs Bank  \n  299 kr  "
+
+    class FakeReader:
+        def __init__(self, _stream):
+            self.pages = [FakePage()]
+
+    monkeypatch.setattr("app.ingest_content.PdfReader", FakeReader)
+    pdf_result = extract_text_from_upload(b"%PDF-1.4 fake", file_name="invoice.pdf", mime_type="application/pdf")
+    assert "Faktura april" in pdf_result.text
+    assert pdf_result.extraction_mode == "pdf_text"
+    assert any("PDF" in note for note in pdf_result.notes)
+
+
+def test_ingest_analyze_returns_document_summary_and_review_groups(tmp_path, monkeypatch):
+    app = load_app(tmp_path)
+    from app import ai_services
+    from app import schemas
+
+    app_response = ai_services.IngestStructuredOutput(
+        classification=ai_services.IngestDocumentClassificationOutput(
+            document_type="invoice",
+            provider_name="Resurs Bank",
+            label="Resurs Bank faktura april",
+            amount=299.0,
+            currency="SEK",
+            due_date="2026-04-12",
+            cadence="monthly",
+            category_hint="subscription",
+            suggested_target_entity_type="recurring_cost",
+            household_relevance="high",
+            confidence=0.94,
+            confirmed_fields=["provider_name", "amount", "due_date"],
+            notes=["Belopp och förfallodag framgår tydligt."],
+            uncertainty_reasons=["Cadence bygger på textens månadslogik."],
+        ),
+        summary="Det här ser ut som en återkommande faktura för ett hushåll.",
+        guidance=["Skapa ett reviewutkast om kostnaden är hushållsrelevant."],
+        suggestions=[
+            ai_services.IngestStructuredSuggestion(
+                target_entity_type="recurring_cost",
+                review_bucket="recurring_cost",
+                title="Resurs Bank - återkommande kostnad",
+                rationale="Månadsfaktura med tydligt belopp.",
+                confidence=0.91,
+                proposed_json='{"household_id": 1, "category": "debt", "amount": 299, "frequency": "monthly", "vendor": "Resurs Bank", "mandatory": true, "variability_class": "fixed", "controllability": "locked"}',
+                uncertainty_notes=["Beloppet verkar vara totalbeloppet."],
+            )
+        ],
+    )
+
+    def fake_call_openai_structured(*_args, **_kwargs):
+        return app_response, "gpt-test", schemas.AIUsageRead(input_tokens=120, output_tokens=60, total_tokens=180)
+
+    monkeypatch.setattr(ai_services, "_call_openai_structured", fake_call_openai_structured)
+
+    with TestClient(app) as client:
+        ids = create_household_fixture(client)
+        household_id = ids["household_id"]
+
+        document = client.post(
+            "/documents",
+            json={
+                "household_id": household_id,
+                "document_type": "invoice",
+                "file_name": "resurs.pdf",
+                "mime_type": "application/pdf",
+                "extracted_text": "Resurs Bank faktura april 299 kr förfaller 2026-04-12.",
+            },
+        )
+        assert document.status_code == 201
+        document_id = document.json()["id"]
+
+        response = client.post(
+            f"/households/{household_id}/ingest_ai/analyze",
+            json={
+                "document_id": document_id,
+                "source_channel": "uploaded_pdf",
+                "source_name": "Resurs Bank",
+            },
+        )
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["document_summary"]["document_type"] == "invoice"
+        assert payload["document_summary"]["provider_name"] == "Resurs Bank"
+        assert payload["document_summary"]["confirmed_fields"] == ["provider_name", "amount", "due_date"]
+        assert payload["document_summary"]["confidence"] == 0.94
+        assert payload["suggestions"][0]["review_bucket"] == "recurring_cost"
+        assert payload["review_groups"][0]["suggestion_count"] == 1
+        assert payload["input_details"]["source_channel"] == "uploaded_pdf"
+        assert payload["input_details"]["document_id"] == document_id
+        assert payload["future_image_readiness"]["supported"] is False
+
+
+def test_ingest_analyze_ignores_invalid_due_date_from_model(tmp_path, monkeypatch):
+    app = load_app(tmp_path)
+    from app import ai_services
+    from app import schemas
+
+    app_response = ai_services.IngestStructuredOutput(
+        classification=ai_services.IngestDocumentClassificationOutput(
+            document_type="invoice",
+            provider_name="Oklart AB",
+            label="Stökig faktura",
+            amount=87.5,
+            currency="EUR",
+            due_date="not-a-date",
+            cadence="monthly",
+            category_hint="unknown",
+            suggested_target_entity_type="recurring_cost",
+            household_relevance="medium",
+            confidence=0.61,
+            confirmed_fields=["provider_name", "amount", "currency"],
+            notes=["Texten är osäker."],
+            uncertainty_reasons=["Datumet kunde inte läsas säkert."],
+        ),
+        summary="Osäker faktura.",
+        guidance=["Behandla som osäkert underlag."],
+        suggestions=[],
+    )
+
+    def fake_call_openai_structured(*_args, **_kwargs):
+        return app_response, "gpt-test", schemas.AIUsageRead(input_tokens=80, output_tokens=40, total_tokens=120)
+
+    monkeypatch.setattr(ai_services, "_call_openai_structured", fake_call_openai_structured)
+
+    with TestClient(app) as client:
+        ids = create_household_fixture(client)
+        household_id = ids["household_id"]
+
+        response = client.post(
+            f"/households/{household_id}/ingest_ai/analyze",
+            json={
+                "input_text": "Kund: ACME. Betala helst snart. Något med 87,50 EUR, kanske månadsvis?",
+                "input_kind": "pdf_text",
+                "source_channel": "pdf_text",
+                "source_name": "Oklart underlag",
+            },
+        )
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["document_summary"]["due_date"] is None
+        assert any("förfallodatum" in item.lower() for item in payload["document_summary"]["uncertainty_reasons"])
+
+
+def test_ingest_promote_reuses_existing_document_id(tmp_path):
+    app = load_app(tmp_path)
+    with TestClient(app) as client:
+        ids = create_household_fixture(client)
+        household_id = ids["household_id"]
+        recurring_before = client.get("/recurring_costs?skip=0&limit=100")
+        assert recurring_before.status_code == 200
+        recurring_before_count = len([item for item in recurring_before.json() if item["household_id"] == household_id])
+
+        document = client.post(
+            "/documents",
+            json={
+                "household_id": household_id,
+                "document_type": "invoice",
+                "file_name": "existing.txt",
+                "mime_type": "text/plain",
+                "extracted_text": "Resurs Bank faktura april 299 kr förfaller 2026-04-12.",
+            },
+        )
+        assert document.status_code == 201
+        document_id = document.json()["id"]
+
+        suggestion = {
+            "target_entity_type": "recurring_cost",
+            "review_bucket": "recurring_cost",
+            "title": "Resurs Bank - återkommande kostnad",
+            "rationale": "Tydlig månadsfaktura.",
+            "confidence": 0.9,
+            "proposed_json": {
+                "household_id": household_id,
+                "category": "debt",
+                "amount": 299,
+                "frequency": "monthly",
+                "vendor": "Resurs Bank",
+                "mandatory": True,
+                "variability_class": "fixed",
+                "controllability": "locked",
+            },
+            "validation_status": "valid",
+            "validation_errors": [],
+            "uncertainty_notes": ["Viss avrundning kan förekomma."],
+        }
+
+        response = client.post(
+            f"/households/{household_id}/ingest_ai/promote",
+            json={
+                "document_id": document_id,
+                "source_channel": "uploaded_document",
+                "source_name": "Resurs Bank",
+                "provider": "openai",
+                "model": "gpt-test",
+                "document_summary": {
+                    "document_type": "invoice",
+                    "provider_name": "Resurs Bank",
+                    "label": "Resurs Bank faktura april",
+                    "amount": 299,
+                    "currency": "SEK",
+                    "due_date": "2026-04-12",
+                    "cadence": "monthly",
+                    "category_hint": "subscription",
+                    "suggested_target_entity_type": "recurring_cost",
+                    "household_relevance": "high",
+                    "confidence": 0.94,
+                    "confirmed_fields": ["provider_name", "amount", "due_date"],
+                    "notes": ["Beloppet är tydligt."],
+                    "uncertainty_reasons": ["Cadence är tolkad."],
+                },
+                "suggestions": [suggestion],
+            },
+        )
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["document_id"] == document_id
+        assert payload["document_type"] == "invoice"
+        assert payload["created_drafts"][0]["validation_status"] == "valid"
+
+        documents = client.get("/documents?skip=0&limit=100")
+        assert documents.status_code == 200
+        household_documents = [item for item in documents.json() if item["household_id"] == household_id]
+        assert len(household_documents) == 1
+
+        drafts = client.get("/extraction_drafts?skip=0&limit=100")
+        assert drafts.status_code == 200
+        household_drafts = [item for item in drafts.json() if item["household_id"] == household_id]
+        assert len(household_drafts) == 1
+
+        recurring_after = client.get("/recurring_costs?skip=0&limit=100")
+        assert recurring_after.status_code == 200
+        recurring_after_count = len([item for item in recurring_after.json() if item["household_id"] == household_id])
+        assert recurring_after_count == recurring_before_count
+
+
+def test_ingest_analyze_rejects_image_placeholder(tmp_path):
+    app = load_app(tmp_path)
+    with TestClient(app) as client:
+        ids = create_household_fixture(client)
+        household_id = ids["household_id"]
+
+        response = client.post(
+            f"/households/{household_id}/ingest_ai/analyze",
+            json={"input_text": "något", "source_channel": "image_placeholder"},
+        )
+        assert response.status_code == 501
+        assert "bild" in response.json()["detail"].lower()
+
+
+def test_document_upload_marks_image_as_ocr_pending(tmp_path):
+    app = load_app(tmp_path)
+    with TestClient(app) as client:
+        ids = create_household_fixture(client)
+        household_id = ids["household_id"]
+
+        upload = client.post(
+            "/documents/upload",
+            data={"household_id": str(household_id), "document_type": "receipt", "issuer": "Telefon"},
+            files={"file": ("screen.png", io.BytesIO(b"\x89PNG\r\n\x1a\nfake"), "image/png")},
+        )
+        assert upload.status_code == 201
+        payload = upload.json()
+        assert payload["extracted_text"] is None
+        assert payload["extraction_status"] == "ocr_pending"

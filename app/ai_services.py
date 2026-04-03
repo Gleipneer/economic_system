@@ -1,19 +1,23 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from collections import defaultdict
+from datetime import date, datetime
+from pathlib import Path
 from typing import Any, Literal
 
 import httpx
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, confloat
 from sqlalchemy.orm import Session
 
 from . import calculations, models, schemas
+from .ingest_content import extract_text_from_upload, normalize_ingest_text
 from .settings import Settings
 
 
 DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
 SUPPORTED_INGEST_TARGETS = {"recurring_cost", "subscription_contract", "loan", "income_source"}
+SUPPORTED_INGEST_INPUT_MEDIUMS = {"text", "pdf_text", "uploaded_document", "uploaded_pdf", "image_placeholder"}
 
 
 class AIProviderUnavailableError(RuntimeError):
@@ -21,6 +25,10 @@ class AIProviderUnavailableError(RuntimeError):
 
 
 class AIProviderResponseError(RuntimeError):
+    pass
+
+
+class AIInputNotSupportedError(RuntimeError):
     pass
 
 
@@ -33,17 +41,35 @@ class AnalysisStructuredOutput(StrictModel):
     answer_markdown: str
 
 
+class IngestDocumentClassificationOutput(StrictModel):
+    document_type: Literal["subscription_contract", "invoice", "recurring_cost_candidate", "financial_note", "unclear"]
+    provider_name: str | None
+    label: str | None
+    amount: float | None
+    currency: str | None
+    due_date: str | None
+    cadence: str | None
+    category_hint: str | None
+    suggested_target_entity_type: Literal["recurring_cost", "subscription_contract", "loan", "income_source"] | None
+    household_relevance: Literal["low", "medium", "high"]
+    confidence: confloat(ge=0.0, le=1.0) | None
+    confirmed_fields: list[str]
+    notes: list[str]
+    uncertainty_reasons: list[str]
+
+
 class IngestStructuredSuggestion(StrictModel):
     target_entity_type: Literal["recurring_cost", "subscription_contract", "loan", "income_source"]
+    review_bucket: Literal["recurring_cost", "subscription_contract", "loan", "income_source", "unclear"]
     title: str
     rationale: str
-    confidence: float | None
+    confidence: confloat(ge=0.0, le=1.0) | None
     proposed_json: str
     uncertainty_notes: list[str]
 
 
 class IngestStructuredOutput(StrictModel):
-    detected_kind: Literal["bank_copy_paste", "subscription_contract", "invoice_or_bill", "financial_note", "unknown"]
+    classification: IngestDocumentClassificationOutput
     summary: str
     guidance: list[str]
     suggestions: list[IngestStructuredSuggestion]
@@ -270,6 +296,282 @@ def _format_analysis_answer(structured: AnalysisStructuredOutput) -> str:
     return structured.answer_markdown.strip()
 
 
+def _normalize_source_channel(source_channel: str | None, input_kind: str | None) -> str:
+    candidate = (source_channel or "").strip().lower()
+    if candidate in SUPPORTED_INGEST_INPUT_MEDIUMS:
+        return candidate
+
+    legacy = (input_kind or "").strip().lower()
+    if legacy in {"text", "paste", "bank_copy_paste", "subscription_contract", "invoice_or_bill", "financial_note", "unknown"}:
+        return "text"
+    if legacy == "upload_text":
+        return "uploaded_document"
+    if legacy == "pdf_text":
+        return "pdf_text"
+    if legacy == "uploaded_pdf":
+        return "uploaded_pdf"
+    if legacy == "image_placeholder":
+        return "image_placeholder"
+    return "text"
+
+
+def _legacy_input_kind(input_kind: str | None) -> str:
+    value = (input_kind or "unknown").strip().lower()
+    if value in {"bank_copy_paste", "subscription_contract", "invoice_or_bill", "financial_note"}:
+        return value
+    return "unknown"
+
+
+def _presented_input_kind(input_kind: str | None, source_channel: str) -> str:
+    value = (input_kind or "").strip().lower()
+    return value or source_channel
+
+
+def _legacy_document_type_for_input(input_kind: str | None) -> str:
+    mapping = {
+        "bank_copy_paste": "bank_statement",
+        "subscription_contract": "contract",
+        "invoice_or_bill": "invoice",
+        "financial_note": "receipt",
+        "unknown": "receipt",
+    }
+    return mapping.get(_legacy_input_kind(input_kind), "receipt")
+
+
+def _document_type_from_classification(document_type: str, source_channel: str) -> str:
+    if document_type == "subscription_contract":
+        return "contract"
+    if document_type == "invoice":
+        return "invoice"
+    if document_type == "recurring_cost_candidate":
+        return "receipt"
+    if document_type == "financial_note":
+        return "receipt"
+    return "receipt"
+
+
+def _review_bucket_for_suggestion(
+    suggestion: IngestStructuredSuggestion,
+    classification: IngestDocumentClassificationOutput,
+) -> str:
+    if suggestion.review_bucket != "unclear":
+        return suggestion.review_bucket
+    if classification.suggested_target_entity_type:
+        return classification.suggested_target_entity_type
+    return suggestion.target_entity_type
+
+
+def _review_group_title(group_type: str) -> str:
+    return {
+        "subscription_contract": "Abonnemang och avtal",
+        "recurring_cost": "Återkommande kostnad",
+        "loan": "Lån och avbetalning",
+        "income_source": "Inkomstkälla",
+        "unclear": "Oklara förslag",
+    }.get(group_type, "Oklara förslag")
+
+
+def _get_household_document_or_404(db: Session, household_id: int, document_id: int) -> models.Document:
+    document = db.get(models.Document, document_id)
+    if document is None or document.household_id != household_id:
+        raise AIProviderResponseError(f"Document med id {document_id} finns inte för hushållet.")
+    return document
+
+
+def _read_uploaded_document_text(document: models.Document) -> tuple[str | None, str, list[str]]:
+    if document.extracted_text:
+        channel = "pdf_text" if (document.mime_type or "").lower() == "application/pdf" else "document_text"
+        note = (
+            "Redan extraherad PDF-text återanvändes från dokumentet."
+            if channel == "pdf_text"
+            else "Redan extraherad text återanvändes från dokumentet."
+        )
+        return normalize_ingest_text(document.extracted_text), channel, [note]
+
+    if not document.storage_path:
+        return document.extracted_text, "document_text", ["Dokumentet saknar lagrad fil."]
+
+    file_path = Path(document.storage_path)
+    if not file_path.is_absolute():
+        file_path = Path.cwd() / file_path
+    if not file_path.exists():
+        return document.extracted_text, "document_text", ["Den lagrade filen hittades inte."]
+
+    raw = file_path.read_bytes()
+    extracted = extract_text_from_upload(raw, file_name=document.file_name, mime_type=document.mime_type)
+    notes = ["Text försöktes läsas ur lagrad fil."] + extracted.notes
+    return extracted.text, extracted.extraction_mode, notes
+
+
+def _resolve_ingest_input(
+    db: Session,
+    household_id: int,
+    *,
+    request_input: str | None,
+    source_channel: str,
+    document_id: int | None,
+    source_name: str | None,
+) -> tuple[str, schemas.IngestInputRead]:
+    if source_channel == "image_placeholder":
+        raise AIInputNotSupportedError("Bild- och screenshotavläsning är inte implementerad ännu.")
+
+    text = request_input.strip() if request_input else ""
+    extraction_notes: list[str] = []
+    extraction_mode = "user_paste"
+    input_origin = "user_paste"
+    document_file_name: str | None = None
+    resolved_document_id = document_id
+    resolved_source_name = source_name
+
+    if document_id is not None:
+        document = _get_household_document_or_404(db, household_id, document_id)
+        document_text, extraction_mode, document_notes = _read_uploaded_document_text(document)
+        extraction_notes.extend(document_notes)
+        resolved_document_id = document.id
+        document_file_name = document.file_name
+        resolved_source_name = source_name or document.issuer or document.file_name
+        if document_text:
+            text = document_text
+        if extraction_mode == "pdf_text":
+            input_origin = "pdf_text"
+        elif extraction_mode.startswith("document"):
+            input_origin = "document_text"
+        else:
+            input_origin = "file_text"
+    else:
+        if source_channel in {"uploaded_document", "uploaded_pdf"}:
+            input_origin = "file_text"
+        elif source_channel == "pdf_text":
+            input_origin = "pdf_text"
+        else:
+            input_origin = "user_paste"
+
+    if not text:
+        if any("ocr" in note.lower() or "screenshot" in note.lower() for note in extraction_notes):
+            raise AIInputNotSupportedError(
+                "Dokumentet kräver OCR för att bli läsbart. Bild- och screenshotavläsning är inte implementerad ännu."
+            )
+        raise AIProviderResponseError("Ingest kräver text eller ett dokument_id med extraherbar text.")
+
+    normalized_text = normalize_ingest_text(text)
+    was_truncated = len(normalized_text) > 6000
+    limited_text = normalized_text[:6000] if was_truncated else normalized_text
+    if was_truncated:
+        extraction_notes.append("Texten trunkerades till 6000 tecken för att hålla tokenkostnaden nere.")
+
+    input_details = schemas.IngestInputRead(
+        source_channel=source_channel,
+        input_origin=input_origin,
+        document_id=resolved_document_id,
+        document_file_name=document_file_name,
+        source_name=resolved_source_name,
+        text_length=len(normalized_text),
+        text_truncated=was_truncated,
+        extraction_mode=extraction_mode,
+        extraction_notes=extraction_notes,
+    )
+    return limited_text, input_details
+
+
+def _build_document_summary_read(structured: IngestDocumentClassificationOutput) -> schemas.IngestDocumentSummaryRead:
+    uncertainty_reasons = list(structured.uncertainty_reasons)
+    due_date: date | None = None
+    if structured.due_date:
+        parsed_due_date = structured.due_date.strip()
+        if parsed_due_date:
+            try:
+                candidate = date.fromisoformat(parsed_due_date)
+                if 1900 <= candidate.year <= 2100:
+                    due_date = candidate
+                else:
+                    uncertainty_reasons.append("Ogiltigt eller osannolikt förfallodatum från modellen ignorerades.")
+            except ValueError:
+                uncertainty_reasons.append("Ogiltigt förfallodatum från modellen ignorerades.")
+    return schemas.IngestDocumentSummaryRead(
+        document_type=structured.document_type,
+        provider_name=structured.provider_name,
+        label=structured.label,
+        amount=structured.amount,
+        currency=structured.currency,
+        due_date=due_date,
+        cadence=structured.cadence,
+        category_hint=structured.category_hint,
+        suggested_target_entity_type=structured.suggested_target_entity_type,
+        household_relevance=structured.household_relevance,
+        confidence=structured.confidence,
+        confirmed_fields=list(structured.confirmed_fields),
+        notes=list(structured.notes),
+        uncertainty_reasons=uncertainty_reasons,
+    )
+
+
+def _group_ingest_suggestions(
+    suggestions: list[schemas.IngestSuggestionRead],
+    classification: schemas.IngestDocumentSummaryRead,
+) -> list[schemas.IngestReviewGroupRead]:
+    grouped: dict[str, list[schemas.IngestSuggestionRead]] = defaultdict(list)
+    for suggestion in suggestions:
+        grouped[suggestion.review_bucket].append(suggestion)
+
+    review_groups: list[schemas.IngestReviewGroupRead] = []
+    for group_type, group_suggestions in grouped.items():
+        confidence_values = [item.confidence for item in group_suggestions if item.confidence is not None]
+        review_groups.append(
+            schemas.IngestReviewGroupRead(
+                group_type=group_type,
+                title=_review_group_title(group_type),
+                summary=classification.label
+                or classification.provider_name
+                or classification.document_type.replace("_", " "),
+                confidence=max(confidence_values) if confidence_values else classification.confidence,
+                suggestion_count=len(group_suggestions),
+                uncertainty_reasons=list(classification.uncertainty_reasons),
+                suggestions=group_suggestions,
+            )
+        )
+
+    if not review_groups:
+        review_groups.append(
+            schemas.IngestReviewGroupRead(
+                group_type="unclear",
+                title="Oklara förslag",
+                summary=classification.label or "Inga validerade förslag kunde skapas.",
+                confidence=classification.confidence,
+                suggestion_count=0,
+                uncertainty_reasons=list(classification.uncertainty_reasons),
+                suggestions=[],
+            )
+        )
+
+    return review_groups
+
+
+def _apply_document_summary_to_document(
+    document: models.Document,
+    *,
+    document_summary: schemas.IngestDocumentSummaryRead | None,
+    source_channel: str,
+    source_name: str | None,
+) -> str:
+    if source_name and not document.issuer:
+        document.issuer = source_name
+
+    if document_summary is None:
+        return document.document_type
+
+    if document_summary.provider_name and not document.issuer:
+        document.issuer = document_summary.provider_name
+    if document_summary.amount is not None and document.total_amount is None:
+        document.total_amount = document_summary.amount
+    if document_summary.currency and not document.currency:
+        document.currency = document_summary.currency
+
+    document_type = _document_type_from_classification(document_summary.document_type, source_channel)
+    if document_summary.document_type != "unclear":
+        document.document_type = document_type
+    return document_type
+
+
 def generate_analysis_answer(
     db: Session,
     household_id: int,
@@ -305,6 +607,33 @@ def _ingest_field_guides(records: dict[str, list[dict[str, Any]]]) -> dict[str, 
     people = [{"id": item["id"], "name": item["name"]} for item in records["persons"]]
     return {
         "people": people,
+        "document_types": [
+            "subscription_contract",
+            "invoice",
+            "recurring_cost_candidate",
+            "financial_note",
+            "unclear",
+        ],
+        "review_buckets": ["recurring_cost", "subscription_contract", "loan", "income_source", "unclear"],
+        "document_summary_shape": {
+            "required": [
+                "document_type",
+                "provider_name",
+                "label",
+                "amount",
+                "currency",
+                "due_date",
+                "cadence",
+                "category_hint",
+                "suggested_target_entity_type",
+                "household_relevance",
+                "confidence",
+                "confirmed_fields",
+                "notes",
+                "uncertainty_reasons",
+            ],
+            "notes": "Sätt null om ett fält inte framgår tydligt. confirmed_fields får bara innehålla säkert lästa fält.",
+        },
         "frequency_values": ["monthly", "yearly", "weekly", "biweekly", "daily"],
         "subscription_categories": [
             "mobile",
@@ -340,6 +669,7 @@ def _ingest_field_guides(records: dict[str, list[dict[str, Any]]]) -> dict[str, 
 def _validated_ingest_suggestion(
     household_id: int,
     suggestion: IngestStructuredSuggestion,
+    classification: IngestDocumentClassificationOutput,
 ) -> schemas.IngestSuggestionRead:
     try:
         parsed_json = json.loads(suggestion.proposed_json)
@@ -371,8 +701,15 @@ def _validated_ingest_suggestion(
         except ValidationError as exc:
             validation_errors.extend(error["msg"] for error in exc.errors())
 
+    review_bucket = _review_bucket_for_suggestion(suggestion, classification)
+
     return schemas.IngestSuggestionRead(
         target_entity_type=target,
+        review_bucket=(
+            review_bucket
+            if review_bucket in {"recurring_cost", "subscription_contract", "loan", "income_source", "unclear"}
+            else "unclear"
+        ),
         title=suggestion.title,
         rationale=suggestion.rationale,
         confidence=suggestion.confidence,
@@ -387,29 +724,35 @@ def analyze_ingest_input(
     db: Session,
     household_id: int,
     *,
-    input_text: str,
+    input_text: str | None,
     input_kind: str,
+    source_channel: str,
+    document_id: int | None,
     source_name: str | None,
     settings: Settings,
 ) -> tuple[schemas.IngestAnalyzeResponse, str]:
+    normalized_source_channel = _normalize_source_channel(source_channel, input_kind)
     records = calculations.load_household_records(db, household_id)
-    truncated_input = input_text.strip()
-    was_truncated = len(truncated_input) > 6000
-    if was_truncated:
-        truncated_input = truncated_input[:6000]
+    truncated_input, input_details = _resolve_ingest_input(
+        db,
+        household_id,
+        request_input=input_text,
+        source_channel=normalized_source_channel,
+        document_id=document_id,
+        source_name=source_name,
+    )
 
     instructions = (
-        "Du analyserar rå ekonomitext för en svensk hushållsekonomiapp. "
-        "Var konservativ. Föreslå bara strukturerade poster när texten ger tydligt stöd. "
-        "Om transaktionsdata inte kan mappas säkert till befintliga tabeller ska du hellre lämna suggestions tom och förklara varför. "
-        "Du får bara föreslå target_entity_type som finns i payload.supported_shapes. "
-        "Inkludera inte household_id om backend kan fylla det. "
-        "Fältet proposed_json måste vara ett JSON-objekt serialiserat som en sträng. "
-        "Inga direkta skrivningar sker nu."
+        "Analysera svensk hushållstext konservativt. "
+        "Sätt null när något inte syns tydligt och lägg bara säkra fält i confirmed_fields. "
+        "Skapa suggestions bara vid tydligt stöd, sätt review_bucket och använd bara target_entity_type från payload.supported_shapes. "
+        "Visa osäkerhet öppet. Inga direkta skrivningar sker nu."
     )
     payload = {
-        "input_kind": input_kind,
-        "source_name": source_name,
+        "input_kind": _legacy_input_kind(input_kind),
+        "source_channel": normalized_source_channel,
+        "source_name": input_details.source_name,
+        "document_id": document_id,
         "raw_text": truncated_input,
         "supported_shapes": _ingest_field_guides(records),
     }
@@ -420,21 +763,33 @@ def analyze_ingest_input(
         payload=payload,
         response_model=IngestStructuredOutput,
         schema_name="ingest_response",
-        max_output_tokens=800,
+        max_output_tokens=720,
     )
-    suggestions = [_validated_ingest_suggestion(household_id, suggestion) for suggestion in structured.suggestions]
+    suggestions = [
+        _validated_ingest_suggestion(household_id, suggestion, structured.classification)
+        for suggestion in structured.suggestions
+    ]
+    document_summary = _build_document_summary_read(structured.classification)
+    review_groups = _group_ingest_suggestions(suggestions, document_summary)
     guidance = list(structured.guidance)
-    if was_truncated:
+    guidance.extend(input_details.extraction_notes)
+    if input_details.text_truncated:
         guidance.append("Råtexten trunkerades till 6000 tecken för låg tokenkostnad. Dela upp större underlag vid behov.")
     return (
         schemas.IngestAnalyzeResponse(
             household_id=household_id,
-            source_name=source_name,
-            input_kind=input_kind,
-            detected_kind=structured.detected_kind,
+            source_name=input_details.source_name,
+            input_kind=_presented_input_kind(input_kind, normalized_source_channel),
+            source_channel=normalized_source_channel,
+            document_id=input_details.document_id,
+            input_details=input_details,
+            detected_kind=document_summary.document_type,
+            document_summary=document_summary,
+            review_groups=review_groups,
             summary=structured.summary,
             guidance=guidance,
             suggestions=suggestions,
+            future_image_readiness=schemas.IngestFutureImageReadinessRead(),
             provider="openai",
             model=model_name,
             usage=usage,
@@ -443,40 +798,70 @@ def analyze_ingest_input(
     )
 
 
-def _document_type_for_input(input_kind: str) -> str:
-    mapping = {
-        "bank_copy_paste": "bank_statement",
-        "subscription_contract": "contract",
-        "invoice_or_bill": "invoice",
-        "financial_note": "receipt",
-        "unknown": "receipt",
-    }
-    return mapping.get(input_kind, "receipt")
-
-
 def promote_ingest_suggestions(
     db: Session,
     household_id: int,
     request_body: schemas.IngestPromoteRequest,
 ) -> schemas.IngestPromoteResponse:
+    normalized_source_channel = _normalize_source_channel(request_body.source_channel, request_body.input_kind)
+    if normalized_source_channel == "image_placeholder":
+        raise AIInputNotSupportedError("Bild- och screenshotavläsning är inte implementerad ännu.")
+
     valid_suggestions = [item for item in request_body.suggestions if item.validation_status == "valid"]
     if not valid_suggestions:
         raise AIProviderResponseError("Det finns inga validerade förslag att skapa reviewutkast från.")
 
-    timestamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
-    document_type = _document_type_for_input(request_body.input_kind or "unknown")
-    source_stub = (request_body.source_name or "ai-ingest").strip().replace(" ", "-").lower()
-    document = models.Document(
-        household_id=household_id,
-        document_type=document_type,
-        file_name=f"{source_stub}-{timestamp}.txt",
-        mime_type="text/plain",
-        issuer=request_body.source_name,
-        extracted_text=request_body.input_text,
-        extraction_status="pending",
-    )
-    db.add(document)
-    db.flush()
+    normalized_input_text = normalize_ingest_text(request_body.input_text) if request_body.input_text else None
+    document_summary = request_body.document_summary
+    document: models.Document | None = None
+
+    if request_body.document_id is not None:
+        document = _get_household_document_or_404(db, household_id, request_body.document_id)
+        if not document.extracted_text and normalized_input_text:
+            document.extracted_text = normalized_input_text
+            document.extraction_status = "parsed"
+        elif not document.extracted_text:
+            document_text, _, _ = _read_uploaded_document_text(document)
+            if document_text:
+                document.extracted_text = document_text
+                document.extraction_status = "parsed"
+        if not document.extracted_text:
+            raise AIProviderResponseError("Det befintliga dokumentet saknar extraherbar text.")
+        document_type = _apply_document_summary_to_document(
+            document,
+            document_summary=document_summary,
+            source_channel=normalized_source_channel,
+            source_name=request_body.source_name,
+        )
+    else:
+        if normalized_input_text is None:
+            raise AIProviderResponseError("Promote kräver input_text när document_id saknas.")
+        timestamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+        source_stub = (request_body.source_name or "ai-ingest").strip().replace(" ", "-").lower() or "ai-ingest"
+        if document_summary is None:
+            document_type = _legacy_document_type_for_input(request_body.input_kind or "unknown")
+        else:
+            document_type = _document_type_from_classification(document_summary.document_type, normalized_source_channel)
+        document = models.Document(
+            household_id=household_id,
+            document_type=document_type,
+            file_name=f"{source_stub}-{timestamp}.txt",
+            mime_type="text/plain",
+            issuer=request_body.source_name,
+            extracted_text=normalized_input_text,
+            extraction_status="parsed",
+        )
+        db.add(document)
+        db.flush()
+        document_type = _apply_document_summary_to_document(
+            document,
+            document_summary=document_summary,
+            source_channel=normalized_source_channel,
+            source_name=request_body.source_name,
+        )
+
+    if document is None:
+        raise AIProviderResponseError("Promote kunde inte knyta an till ett dokument.")
 
     created_drafts: list[schemas.CreatedDraftRead] = []
     for suggestion in valid_suggestions:

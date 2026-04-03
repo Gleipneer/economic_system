@@ -34,6 +34,7 @@ from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 
 from . import ai_services, calculations, database, models, schemas
+from .ingest_content import extract_text_from_upload, normalize_ingest_text
 from .settings import get_settings
 
 settings = get_settings()
@@ -98,7 +99,7 @@ def ensure_household_exists(db: Session, household_id: int):
     return get_object_or_404(db, models.Household, household_id)
 
 
-def upload_to_disk(household_id: int, file: UploadFile) -> tuple[str, str]:
+def upload_to_disk(household_id: int, file: UploadFile) -> tuple[str, str, bytes]:
     household_dir = UPLOAD_ROOT / str(household_id)
     household_dir.mkdir(parents=True, exist_ok=True)
     raw = file.file.read()
@@ -106,7 +107,7 @@ def upload_to_disk(household_id: int, file: UploadFile) -> tuple[str, str]:
     safe_name = f"{uuid4().hex}_{Path(file.filename or 'document.bin').name}"
     destination = household_dir / safe_name
     destination.write_bytes(raw)
-    return str(destination.resolve()), checksum
+    return str(destination.resolve()), checksum, raw
 
 
 def draft_target_config(target_entity_type: str):
@@ -680,7 +681,22 @@ def upload_document(
     db: Session = Depends(get_db),
 ):
     ensure_household_exists(db, household_id)
-    storage_path, checksum = upload_to_disk(household_id, file)
+    storage_path, checksum, raw = upload_to_disk(household_id, file)
+    extracted_payload = normalize_ingest_text(extracted_text) if extracted_text and extracted_text.strip() else None
+    extraction_status = "parsed"
+    if extracted_payload is None:
+        auto_extracted = extract_text_from_upload(raw, file_name=file.filename, mime_type=file.content_type)
+        extracted_payload = auto_extracted.text
+        extraction_status = (
+            "parsed"
+            if extracted_payload
+            else {
+                "ocr_not_implemented": "ocr_pending",
+                "unsupported_binary": "unsupported",
+                "pdf_unreadable": "parse_failed",
+                "pdf_no_text": "parse_failed",
+            }.get(auto_extracted.extraction_mode, "pending")
+        )
     document = models.Document(
         household_id=household_id,
         document_type=document_type,
@@ -689,8 +705,8 @@ def upload_document(
         checksum=checksum,
         issuer=issuer,
         currency=currency,
-        extracted_text=extracted_text,
-        extraction_status="pending",
+        extracted_text=extracted_payload,
+        extraction_status=extraction_status,
         storage_path=storage_path,
     )
     db.add(document)
@@ -1039,12 +1055,16 @@ def household_ingest_ai_analyze(
             household_id,
             input_text=request_body.input_text,
             input_kind=request_body.input_kind or "unknown",
+            source_channel=request_body.source_channel,
+            document_id=request_body.document_id,
             source_name=request_body.source_name,
             settings=settings,
         )
         return response
     except ai_services.AIProviderUnavailableError as exc:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+    except ai_services.AIInputNotSupportedError as exc:
+        raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED, detail=str(exc)) from exc
     except ai_services.AIProviderResponseError as exc:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
 
@@ -1061,6 +1081,8 @@ def household_ingest_ai_promote(
     ensure_household_exists(db, household_id)
     try:
         return ai_services.promote_ingest_suggestions(db, household_id, request_body)
+    except ai_services.AIInputNotSupportedError as exc:
+        raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED, detail=str(exc)) from exc
     except ai_services.AIProviderResponseError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
