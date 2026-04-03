@@ -161,9 +161,12 @@ class Loan(Base):
     household_id = Column(Integer, ForeignKey("households.id", ondelete="CASCADE"), nullable=False)
     person_id = Column(Integer, ForeignKey("persons.id", ondelete="SET NULL"), nullable=True)
     type = Column(String, nullable=False)  # car, mortgage, credit_card, personal_loan, csn, other
+    purpose = Column(String, nullable=True)
     lender = Column(String, nullable=True)
     original_amount = Column(Float, nullable=True)
     current_balance = Column(Float, nullable=True)
+    remaining_term_months = Column(Integer, nullable=True)
+    planned_end_date = Column(Date, nullable=True)
     nominal_rate = Column(Float, nullable=True)
     effective_rate = Column(Float, nullable=True)
     repayment_model = Column(Enum(LoanRepaymentModel), default=LoanRepaymentModel.annuity)
@@ -332,9 +335,6 @@ class HousingScenario(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     # Relationships
     household = relationship("Household", back_populates="scenarios")
-    results = relationship(
-        "ScenarioResult", back_populates="scenario", cascade="all, delete-orphan"
-    )
 
 
 class Document(Base):

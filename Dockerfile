@@ -20,4 +20,4 @@ EXPOSE 8000
 # Run the application with uvicorn. The host and port can be overridden
 # via environment variables at runtime. The reload flag should not be used
 # in production but can be enabled during development.
-CMD ["uvicorn", "economic_system.app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

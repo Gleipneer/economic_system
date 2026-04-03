@@ -1,10 +1,21 @@
 # API & Data Schema for Frontend Integration
 
+Compatibility note: the canonical frontend handoff now lives in:
+
+- `docs/HANDOFF_MASTER.md`
+- `docs/CURRENT_STATE.md`
+- `docs/FRONTEND_DIRECTION.md`
+
+This file remains as an API contract supplement.
+
 This document serves as a reference for frontend developers who will build
 the user interface for the household economics system. It describes the
 data models, their relationships and the RESTful API endpoints exposed by
 the backend. Use this guide to build forms, tables and workflows that
 interact correctly with the backend service.
+
+The repository now includes a lightweight same-origin frontend at `/`,
+but this document remains the contract reference for any separate client.
 
 ## Entity Overview
 
@@ -139,9 +150,10 @@ identifier of the entity.
 * `PUT /documents/:id` – Update a document metadata record
 * `DELETE /documents/:id` – Delete a document metadata record
 
-> **Note:** File uploads are not implemented in this repository. The
-> `storage_path` field can be used by your frontend/backend to store a
-> path or URI to the uploaded file.
+Additional document routes:
+
+* `POST /documents/upload` – Upload a file plus metadata
+* `GET /documents/:id/download` – Download the stored file
 
 ### ExtractionDraft
 
@@ -182,6 +194,20 @@ identifier of the entity.
 * `GET /report_snapshots/:id` – Retrieve a report snapshot
 * `PUT /report_snapshots/:id` – Update a report snapshot
 * `DELETE /report_snapshots/:id` – Delete a report snapshot
+
+### Workflow & Utility Endpoints
+
+* `GET /households/:id/summary` – Deterministic household summary
+* `POST /households/:id/report_snapshots/generate` – Generate a report snapshot from live data
+* `POST /households/:id/optimization_scan` – Generate optimisation suggestions
+* `GET /housing_scenarios/:id/evaluate` – Evaluate a housing scenario
+* `POST /scenarios/:id/run` – Execute a scenario and persist a scenario result
+* `POST /extraction_drafts/:id/apply` – Apply an approved draft into canonical tables
+* `POST /households/:id/assistant/respond` – Return a household-aware assistant answer
+
+Important current truth:
+
+- there is no `POST /demo/seed` route in the current code
 
 ## Data Schemas
 
