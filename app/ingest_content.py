@@ -69,10 +69,34 @@ class NotImplementedOCRExtractor:
 
 def normalize_ingest_text(text: str) -> str:
     text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = text.replace("\u00a0", " ")
+    text = text.replace("\u200b", "")
+    text = re.sub(r"\f", "\n", text)
     lines = [re.sub(r"[ \t]+", " ", line).strip() for line in text.split("\n")]
     collapsed = "\n".join(lines)
     collapsed = re.sub(r"\n{3,}", "\n\n", collapsed)
     return collapsed.strip()
+
+
+def detect_input_hints(text: str) -> list[str]:
+    """Return lightweight structural hints about the input text for the AI prompt."""
+    hints: list[str] = []
+    lower = text.lower()
+    if any(kw in lower for kw in ["faktura", "invoice", "förfallodatum", "betalningsvillkor", "ocr-nummer", "bankgiro"]):
+        hints.append("invoice_keywords")
+    if any(kw in lower for kw in ["abonnemang", "avtal", "bindningstid", "uppsägningstid", "avtalsperiod", "prenumeration"]):
+        hints.append("subscription_keywords")
+    if any(kw in lower for kw in ["bokföringsdatum", "transaktionsdatum", "saldo", "kontonummer", "transaktionstext"]):
+        hints.append("bank_statement_keywords")
+    if re.search(r"\d{1,3}[\s\u00a0]?\d{3}[,\.]\d{2}", text):
+        hints.append("swedish_amounts")
+    if re.search(r"\d{4}-\d{2}-\d{2}", text):
+        hints.append("iso_dates")
+    if re.search(r"(?:moms|vat|mva)\s", lower):
+        hints.append("vat_present")
+    if any(kw in lower for kw in ["kr/mån", "kr/månad", "sek/mån", "per månad", "/mån"]):
+        hints.append("monthly_cost_pattern")
+    return hints
 
 
 def _looks_textual(raw: bytes) -> bool:

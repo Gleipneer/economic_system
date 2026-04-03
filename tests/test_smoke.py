@@ -688,3 +688,113 @@ def test_document_upload_marks_image_as_ocr_pending(tmp_path):
         payload = upload.json()
         assert payload["extracted_text"] is None
         assert payload["extraction_status"] == "ocr_pending"
+
+
+def test_normalize_ingest_text_handles_pdf_paste_artifacts():
+    from app.ingest_content import normalize_ingest_text
+
+    raw = "Faktura\u00a0123\r\nBelopp:\u200b 1\u00a0500,00\fSida 2\r\nLeverantör: Test AB"
+    result = normalize_ingest_text(raw)
+    assert "\u00a0" not in result
+    assert "\u200b" not in result
+    assert "\f" not in result
+    assert "Faktura 123" in result
+    assert "Sida 2" in result
+
+
+def test_detect_input_hints_finds_invoice_keywords():
+    from app.ingest_content import detect_input_hints
+
+    invoice_text = "Faktura 2026-04-01\nFörfallodatum: 2026-04-30\nBelopp: 1 299,00 SEK\nBankgiro: 123-4567"
+    hints = detect_input_hints(invoice_text)
+    assert "invoice_keywords" in hints
+    assert "iso_dates" in hints
+    assert "swedish_amounts" in hints
+
+
+def test_detect_input_hints_finds_subscription_keywords():
+    from app.ingest_content import detect_input_hints
+
+    sub_text = "Abonnemang: Telia Bredband\nBindningstid: 24 månader\nKostnad: 399 kr/mån"
+    hints = detect_input_hints(sub_text)
+    assert "subscription_keywords" in hints
+    assert "monthly_cost_pattern" in hints
+
+
+def test_detect_input_hints_returns_empty_for_generic_text():
+    from app.ingest_content import detect_input_hints
+
+    hints = detect_input_hints("Hej, detta är en generisk text utan specifika nyckelord.")
+    assert hints == []
+
+
+def test_ingest_analyze_includes_input_hints_in_payload(tmp_path, monkeypatch):
+    app = load_app(tmp_path)
+    from app import ai_services
+    from app import schemas
+
+    captured_payload = {}
+
+    app_response = ai_services.IngestStructuredOutput(
+        classification=ai_services.IngestDocumentClassificationOutput(
+            document_type="invoice",
+            provider_name="Telia",
+            label="Telia faktura",
+            amount=399.0,
+            currency="SEK",
+            due_date="2026-04-30",
+            cadence="monthly",
+            category_hint="broadband",
+            suggested_target_entity_type="subscription_contract",
+            household_relevance="high",
+            confidence=0.88,
+            confirmed_fields=["provider_name", "amount", "currency"],
+            notes=["Bredbandsabonnemang med tydligt belopp."],
+            uncertainty_reasons=["Bindningstiden tolkas från text."],
+        ),
+        summary="En faktura för ett bredbandsabonnemang hos Telia.",
+        guidance=["Tydligt abonnemang. Granska om bindningstid stämmer."],
+        suggestions=[
+            ai_services.IngestStructuredSuggestion(
+                target_entity_type="subscription_contract",
+                review_bucket="subscription_contract",
+                title="Telia Bredband",
+                rationale="Tydlig faktura med månatlig kostnad.",
+                confidence=0.85,
+                proposed_json='{"household_id": 1, "category": "broadband", "provider": "Telia", "current_monthly_cost": 399, "billing_frequency": "monthly"}',
+                uncertainty_notes=["Bindningstid tolkas som 24 månader."],
+            )
+        ],
+    )
+
+    original_call = ai_services._call_openai_structured
+
+    def fake_call_openai_structured(settings, *, model, instructions, payload, response_model, schema_name, max_output_tokens):
+        captured_payload.update(payload)
+        return app_response, "gpt-test", schemas.AIUsageRead(input_tokens=150, output_tokens=80, total_tokens=230)
+
+    monkeypatch.setattr(ai_services, "_call_openai_structured", fake_call_openai_structured)
+
+    with TestClient(app) as client:
+        ids = create_household_fixture(client)
+        household_id = ids["household_id"]
+
+        response = client.post(
+            f"/households/{household_id}/ingest_ai/analyze",
+            json={
+                "input_text": "Faktura 2026-04-01\nTelia Bredband\nKostnad: 399 kr/mån\nFörfallodatum: 2026-04-30",
+                "input_kind": "text",
+                "source_channel": "text",
+                "source_name": "Telia",
+            },
+        )
+        assert response.status_code == 200
+        assert "input_hints" in captured_payload
+        assert "invoice_keywords" in captured_payload["input_hints"]
+        assert "monthly_cost_pattern" in captured_payload["input_hints"]
+
+        payload = response.json()
+        assert payload["document_summary"]["document_type"] == "invoice"
+        assert payload["document_summary"]["provider_name"] == "Telia"
+        assert payload["document_summary"]["amount"] == 399.0
+        assert payload["suggestions"][0]["review_bucket"] == "subscription_contract"

@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field, ValidationError, confloat
 from sqlalchemy.orm import Session
 
 from . import calculations, models, schemas
-from .ingest_content import extract_text_from_upload, normalize_ingest_text
+from .ingest_content import detect_input_hints, extract_text_from_upload, normalize_ingest_text
 from .settings import Settings
 
 
@@ -742,17 +742,26 @@ def analyze_ingest_input(
         source_name=source_name,
     )
 
+    input_hints = detect_input_hints(truncated_input)
     instructions = (
-        "Analysera svensk hushållstext konservativt. "
-        "Sätt null när något inte syns tydligt och lägg bara säkra fält i confirmed_fields. "
-        "Skapa suggestions bara vid tydligt stöd, sätt review_bucket och använd bara target_entity_type från payload.supported_shapes. "
-        "Visa osäkerhet öppet. Inga direkta skrivningar sker nu."
+        "Du analyserar svenskt hushållsunderlag konservativt. "
+        "Ditt uppdrag: (1) klassificera dokumenttyp, (2) extrahera kärnfakta, (3) visa osäkerhet. "
+        "Regler: "
+        "- Sätt null när ett fält inte syns tydligt i texten. "
+        "- confirmed_fields får bara innehålla fält som kan läsas direkt ur texten utan gissning. "
+        "- Om texten ser ut som en faktura, identifiera leverantör, belopp, valuta, förfallodatum, frekvens. "
+        "- Om texten ser ut som ett abonnemang, identifiera leverantör, kostnad/månad, bindning, kategori. "
+        "- Skapa suggestions bara när det finns tydligt stöd. "
+        "- review_bucket ska matcha den mest sannolika måltypen. "
+        "- Hellre unclear med ärlig osäkerhet än säker med felaktig klassificering. "
+        "- Inga direkta skrivningar sker nu."
     )
     payload = {
         "input_kind": _legacy_input_kind(input_kind),
         "source_channel": normalized_source_channel,
         "source_name": input_details.source_name,
         "document_id": document_id,
+        "input_hints": input_hints,
         "raw_text": truncated_input,
         "supported_shapes": _ingest_field_guides(records),
     }

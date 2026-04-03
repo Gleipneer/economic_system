@@ -913,3 +913,12 @@ textarea {
     align-items: flex-start;
   }
 }
+
+.ingest-classification-card .record-title { margin-top: var(--space-xs); }
+.ingest-guidance { margin-top: var(--space-s); }
+.ingest-guidance .summary-list { margin: 0; padding-left: var(--space-m); }
+.safe-fields { border-left: 3px solid var(--clr-success, #22c55e); }
+.uncertain-fields { border-left: 3px solid var(--clr-warning, #eab308); }
+.uncertainty-list li { color: var(--clr-warning, #eab308); }
+.summary-panels { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-s); }
+@media (max-width: 680px) { .summary-panels { grid-template-columns: 1fr; } }

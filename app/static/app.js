@@ -3039,10 +3039,46 @@ function renderHousingPageV2() {
 
 function ingestKindOptions() {
   return [
-    ["text", "Klistrad text"],
+    ["text", "Klistrad text (faktura, avtal, kvitto)"],
     ["pdf_text", "Klistrad text från PDF"],
     ["image_placeholder", "Bild eller screenshot (förberett, ej klart)"],
   ];
+}
+
+function classificationLabel(docType) {
+  return {
+    subscription_contract: "Abonnemang / avtal",
+    invoice: "Faktura",
+    recurring_cost_candidate: "Återkommande kostnad",
+    financial_note: "Finansiell anteckning",
+    unclear: "Oklart underlag",
+  }[docType] || docType || "Oklart";
+}
+
+function classificationBadgeTone(docType) {
+  return {
+    subscription_contract: "info",
+    invoice: "success",
+    recurring_cost_candidate: "info",
+    financial_note: "muted",
+    unclear: "warning",
+  }[docType] || "muted";
+}
+
+function confidenceBadge(confidence) {
+  if (confidence == null) return `<span class="badge muted">Confidence ej angiven</span>`;
+  const pct = Math.round(confidence * 100);
+  if (pct >= 80) return `<span class="badge success">Confidence ${pct} %</span>`;
+  if (pct >= 50) return `<span class="badge info">Confidence ${pct} %</span>`;
+  return `<span class="badge warning">Confidence ${pct} %</span>`;
+}
+
+function relevanceBadge(relevance) {
+  return {
+    high: `<span class="badge success">Hög relevans</span>`,
+    medium: `<span class="badge info">Medel relevans</span>`,
+    low: `<span class="badge muted">Låg relevans</span>`,
+  }[relevance] || `<span class="badge muted">${escapeHtml(relevance || "Okänd")}</span>`;
 }
 
 function normalizeIngestResult(result) {
@@ -3312,21 +3348,21 @@ function renderIngestResult() {
   const rawPreviewText = rawPreview.length > 1200 ? `${rawPreview.slice(0, 1200)}...` : rawPreview;
   return `
     <div class="workflow-stack">
-      <article class="record-card">
+      <article class="record-card ingest-classification-card">
         <div class="record-title-row">
           <div>
+            <span class="badge ${classificationBadgeTone(review.documentType)}">${escapeHtml(classificationLabel(review.documentType))}</span>
             <h4 class="record-title">${escapeHtml(review.summary)}</h4>
-            <p class="muted">${escapeHtml(review.documentType)} · ${escapeHtml(ingestSourceChannelLabel(review.inputKind))}${review.provider ? ` · ${escapeHtml(review.provider)}` : ""}${review.model ? ` · ${escapeHtml(review.model)}` : ""}</p>
+            <p class="muted">${escapeHtml(ingestSourceChannelLabel(review.inputKind))}${review.provider ? ` · ${escapeHtml(review.provider)}` : ""}${review.model ? ` · ${escapeHtml(review.model)}` : ""}</p>
           </div>
-          <span class="badge">${review.usage?.total_tokens ? `${review.usage.total_tokens} tokens` : "utan usage"}</span>
+          <span class="badge muted">${review.usage?.total_tokens ? `${review.usage.total_tokens} tokens` : "utan usage"}</span>
         </div>
         <div class="badge-row">
-          <span class="badge info">Klass: ${escapeHtml(review.documentType)}</span>
+          ${confidenceBadge(review.confidence)}
+          ${relevanceBadge(review.householdRelevance)}
           <span class="badge muted">Riktning: ${escapeHtml(review.recommendation)}</span>
-          <span class="badge ${review.confidence == null ? "muted" : "success"}">Confidence ${review.confidence == null ? "ej angiven" : escapeHtml(number(review.confidence, 2))}</span>
         </div>
-        <p class="muted">${escapeHtml(review.summary)}</p>
-        ${review.guidance?.length ? `<p class="muted">${escapeHtml(review.guidance.join(" · "))}</p>` : ""}
+        ${review.guidance?.length ? `<div class="ingest-guidance"><ul class="summary-list">${review.guidance.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul></div>` : ""}
         <div class="workflow-callout">
           <strong>AI-tolkningen är inte kanonisk data.</strong>
           <p class="muted">Promote skapar bara dokument- och reviewutkast. Inget skrivs tyst till hushållets slutgiltiga poster.</p>
@@ -3335,69 +3371,37 @@ function renderIngestResult() {
       <article class="record-card">
         <div class="record-title-row">
           <div>
-            <h4 class="record-title">Rå input</h4>
-            <p class="muted">Det här är källtexten eller dokumenttexten som AI:n fick jobba med.</p>
-          </div>
-          <span class="badge muted">${escapeHtml(ingestSourceChannelLabel(review.inputKind))}</span>
-        </div>
-        <div class="detail-grid three fact-grid">
-          ${detailCell("Källa", review.rawSource || "Ej angiven")}
-          ${detailCell("Dokument", review.documentId ? `#${review.documentId}` : "Ingen")}
-          ${detailCell("Textlängd", review.inputDetails?.text_length ? `${review.inputDetails.text_length} tecken` : "Ej angiven")}
-          ${detailCell("Extraktion", review.inputDetails?.extraction_mode || "manuell")}
-          ${detailCell("Fil", review.inputDetails?.document_file_name || "Ingen fil")}
-          ${detailCell("Trunkerad", review.inputDetails?.text_truncated ? "Ja" : "Nej")}
-        </div>
-        ${review.inputDetails?.extraction_notes?.length ? `<p class="muted">${escapeHtml(review.inputDetails.extraction_notes.join(" · "))}</p>` : ""}
-        ${rawPreviewText ? `<pre class="raw-preview">${escapeHtml(rawPreviewText)}</pre>` : `<div class="empty-state compact"><p>Ingen råtext finns i vyn just nu.</p></div>`}
-      </article>
-      <article class="record-card">
-        <div class="record-title-row">
-          <div>
-            <h4 class="record-title">Document summary</h4>
-            <p class="muted">Säkra kärnfält visas separat från osäkra.</p>
+            <h4 class="record-title">Extraherade kärnfakta</h4>
+            <p class="muted">Säkra fält (bekräftade i texten) visas med grön markering, osäkra med gul.</p>
           </div>
         </div>
+        ${renderIngestFactGrid(review)}
         <div class="summary-panels">
-          <article class="workflow-callout subtle">
-            <strong>Säkra kärnfält</strong>
-            ${renderIngestSummaryBlock(review.safeFields || {
-              provider_name: review.providerName,
-              title: review.title,
-              amount: review.amount,
-              currency: review.currency,
-              due_date: review.dueDate,
-              cadence: review.cadence,
-              household_relevance: review.householdRelevance,
-              notes: review.notes,
-            }, "Inga säkra kärnfält gick att extrahera.")}
+          <article class="workflow-callout subtle safe-fields">
+            <strong>✓ Bekräftade fält</strong>
+            ${renderIngestSummaryBlock(review.safeFields, "Inga fält kunde bekräftas direkt ur texten.")}
           </article>
-          <article class="workflow-callout subtle">
-            <strong>Osäkra kärnfält</strong>
-            ${renderIngestSummaryBlock(review.uncertainFields || review.uncertaintyReasons, "Inga osäkra kärnfält angavs.")}
+          <article class="workflow-callout subtle uncertain-fields">
+            <strong>? Osäkra fält</strong>
+            ${renderIngestSummaryBlock(review.uncertainFields, "Inga osäkra fält.")}
           </article>
         </div>
       </article>
+      ${review.uncertaintyReasons?.length ? `
       <article class="record-card">
         <div class="record-title-row">
           <div>
-            <h4 class="record-title">Osäkerhet</h4>
-            <p class="muted">Det som modellen inte vet säkert ska synas tydligt.</p>
+            <h4 class="record-title">⚠ Osäkerhet och varningar</h4>
+            <p class="muted">Modellen flaggar dessa punkter som osäkra. Granska innan du skapar utkast.</p>
           </div>
         </div>
-        ${review.uncertaintyReasons?.length ? `<ul class="summary-list">${review.uncertaintyReasons.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>` : `<div class="empty-state compact"><p>Ingen osäkerhet angavs, men granska ändå innan promote.</p></div>`}
-        <div class="actions-row">
-          <button class="primary" type="button" data-action="promote-ingest" ${validSuggestions.length ? "" : "disabled"}>
-            ${state.ui.ingestPromoting ? "Skapar utkast..." : "Skapa reviewutkast"}
-          </button>
-          <span class="chat-disclaimer">Detta skapar bara reviewutkast i workflow-lagret. Inget skrivs direkt till kanonisk ekonomi.</span>
-        </div>
-      </article>
+        <ul class="summary-list uncertainty-list">${review.uncertaintyReasons.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>
+      </article>` : ""}
       <article class="record-card">
         <div class="record-title-row">
           <div>
             <h4 class="record-title">Reviewförslag</h4>
-            <p class="muted">Validerade förslag som kan promota vidare till workflow-utkast. Grupperade efter review_bucket när det finns.</p>
+            <p class="muted">Validerade förslag grupperade efter typ.</p>
           </div>
           <span class="badge">${validSuggestions.length} validerade</span>
         </div>
@@ -3406,7 +3410,7 @@ function renderIngestResult() {
             <div class="record-title-row">
               <div>
                 <h5 class="group-title">${escapeHtml(group.title || group.bucket)}</h5>
-                <p class="muted">${escapeHtml(group.summary || "")}${group.summary ? " · " : ""}${group.items.length} förslag</p>
+                <p class="muted">${group.items.length} förslag</p>
               </div>
               <span class="badge muted">${group.items.filter((item) => item.validation_status === "valid").length} validerade</span>
             </div>
@@ -3414,8 +3418,25 @@ function renderIngestResult() {
               ${group.items.map((item) => renderIngestSuggestionCard(item)).join("")}
             </div>
           </section>
-        `).join("") : `<div class="empty-state compact"><p>Inga säkra strukturerade förslag hittades i underlaget.</p></div>`}
+        `).join("") : `<div class="empty-state compact"><p>Inga strukturerade förslag hittades.</p></div>`}
+        <div class="actions-row" style="margin-top:var(--space-m)">
+          <button class="primary" type="button" data-action="promote-ingest" ${validSuggestions.length ? "" : "disabled"}>
+            ${state.ui.ingestPromoting ? "Skapar utkast..." : `Skapa ${validSuggestions.length} reviewutkast`}
+          </button>
+          <span class="chat-disclaimer">Detta skapar bara reviewutkast i workflow-lagret. Inget skrivs direkt till kanonisk ekonomi.</span>
+        </div>
       </article>
+      <details class="raw-json">
+        <summary>Visa rå input (${review.inputDetails?.text_length || 0} tecken)</summary>
+        <article class="record-card">
+          <div class="detail-grid three fact-grid">
+            ${detailCell("Källa", review.rawSource || "Ej angiven")}
+            ${detailCell("Dokument", review.documentId ? `#${review.documentId}` : "Ingen")}
+            ${detailCell("Extraktion", review.inputDetails?.extraction_mode || "manuell")}
+          </div>
+          ${rawPreviewText ? `<pre class="raw-preview">${escapeHtml(rawPreviewText)}</pre>` : `<div class="empty-state compact"><p>Ingen råtext.</p></div>`}
+        </article>
+      </details>
     </div>
   `;
 }
