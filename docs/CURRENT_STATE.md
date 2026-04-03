@@ -164,6 +164,27 @@ Live OpenAI verification on 2026-04-03 used:
 - `gpt-5.4-mini-2026-03-17` for analysis questions
 - `gpt-5.4-mini-2026-03-17` for ingest test cases
 
+## Data-In Input Handling
+
+Current Data-In input paths:
+
+- copy-pasted text (invoices, subscriptions, receipts, generic text)
+- copy-pasted PDF text (with enhanced normalization for PDF-paste artifacts)
+- uploaded documents with extractable text (PDF text extraction, plain text files)
+- uploaded documents analyzed via document_id reference
+
+Pre-processing before AI:
+
+- text normalization: NBSP, zero-width spaces, form feeds, excessive whitespace
+- input hint detection: invoice keywords, subscription keywords, bank statement keywords, Swedish amounts, ISO dates, VAT, monthly cost patterns
+- truncation at 6000 characters with explicit note
+
+Screenshot/image OCR:
+
+- `OCRExtractor` protocol exists as a prepared interface in `app/ingest_content.py`
+- `image_placeholder` source channel returns explicit 501 "not implemented"
+- no actual OCR implementation exists yet
+
 ## What Does Not Exist
 
 These are not implemented in the current code:
@@ -179,6 +200,7 @@ These are not implemented in the current code:
 - object storage
 - `POST /demo/seed`
 - provider abstraction beyond direct OpenAI calls
+- screenshot/image OCR (interface prepared, not implemented)
 
 ## Important Truths That Can Be Missed
 

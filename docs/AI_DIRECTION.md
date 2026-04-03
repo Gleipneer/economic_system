@@ -117,6 +117,22 @@ Observed token shape during validation:
 - analysis prompts: about `969-996` total tokens
 - ingest prompts: about `860-1006` total tokens
 
+## Data-In Improvements (2026-04-03 second pass)
+
+Changes made to improve Data-In for invoices, subscriptions, and PDF-paste:
+
+- The AI prompt now gives explicit classification rules for invoices and subscriptions
+- Input text is pre-analyzed for structural hints (invoice keywords, subscription keywords, Swedish amounts, dates, monthly cost patterns)
+- Text normalization handles PDF-paste artifacts: NBSP, zero-width spaces, form feeds
+- The frontend now shows document classification with color-coded badges, confidence percentages, and separated confirmed vs uncertain fields
+- Screenshot/image OCR remains explicitly not implemented; the `OCRExtractor` protocol and `image_placeholder` rejection are in place as the prepared interface
+
+What was NOT verified with live OpenAI in this pass:
+
+- No live OpenAI calls were made because `OPENAI_API_KEY` was not available in the cloud agent environment
+- The improved prompt, input hints, and normalization were verified via automated tests only
+- Live OpenAI verification of the improved prompt quality requires a configured API key
+
 ## If an OpenAI Gateway Is Added Later
 
 That would belong as a future integration layer, likely behind a backend service boundary.
