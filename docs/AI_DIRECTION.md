@@ -127,11 +127,15 @@ Changes made to improve Data-In for invoices, subscriptions, and PDF-paste:
 - The frontend now shows document classification with color-coded badges, confidence percentages, and separated confirmed vs uncertain fields
 - Screenshot/image OCR remains explicitly not implemented; the `OCRExtractor` protocol and `image_placeholder` rejection are in place as the prepared interface
 
-What was NOT verified with live OpenAI in this pass:
+Live OpenAI verification on 2026-04-03 (second pass) used `gpt-5.4-mini-2026-03-17`:
 
-- No live OpenAI calls were made because `OPENAI_API_KEY` was not available in the cloud agent environment
-- The improved prompt, input hints, and normalization were verified via automated tests only
-- Live OpenAI verification of the improved prompt quality requires a configured API key
+- Subscription text (Telia bredband): classified as `subscription_contract`, confidence 0.98, all key fields confirmed, 1661 tokens
+- Invoice text (Stockholms Stad avfall): classified as `invoice`, confidence 0.98, quarterly→yearly frequency conversion with explicit note, 1843 tokens
+- PDF-pasted text with NBSP (Halebop): classified as `invoice`, confidence 0.96, two valid suggestions (subscription + recurring_cost), 1899 tokens
+- Messy uncertain text (Försäkringskassan): classified as `financial_note`, confidence 0.63, clear uncertainty reasons, suggestion correctly marked invalid, 1844 tokens
+- Full browser promote flow: gym membership invoice analyzed, promoted to workflow draft, verified zero canonical writes
+
+The frequency constraint fix (explicit enum values in field guides) resolved validation errors from the initial invoice test where the model used unsupported `"quarterly"` and `"low"` values.
 
 ## If an OpenAI Gateway Is Added Later
 

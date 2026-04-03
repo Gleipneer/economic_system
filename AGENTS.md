@@ -26,5 +26,7 @@ This is a **Household Economics Backend** — a single-service FastAPI monolith 
 - `OPENAI_API_KEY` is optional. AI assistant and ingest routes return 503 gracefully when it is unset. To test live AI flows, set it in `.env`.
 - SQLite DB lives at `./database.db` in the project root. Delete it to reset state; `alembic upgrade head` or `AUTO_CREATE_SCHEMA=true` will recreate tables.
 - The start script `scripts/start_app.sh` auto-finds a free port if 8000 is occupied.
-- **Data-In architecture**: raw input → AI classify/extract → schema validate → review groups → explicit promote → Document + ExtractionDraft. No silent writes to canonical tables. See `docs/AI_DIRECTION.md`.
+- **Data-In architecture**: raw input → normalize + detect hints → AI classify/extract → schema validate → review groups → explicit promote → Document + ExtractionDraft. No silent writes to canonical tables. See `docs/AI_DIRECTION.md`.
+- **Data-In enum constraints**: The AI field guides in `_ingest_field_guides()` include explicit allowed values for `frequency`, `variability_class`, and `controllability`. The model is instructed to convert unsupported frequencies (e.g. quarterly) to the nearest allowed value with a note. If the model returns invalid enum values, the suggestion is marked `validation_status: "invalid"` but still returned for review.
+- **Data-In token cost**: Live tested at ~1600-1900 total tokens per ingest call with `gpt-5.4-mini`. Analysis assistant calls are ~650-700 tokens.
 - **Screenshot/OCR**: `OCRExtractor` protocol exists in `app/ingest_content.py` but is not implemented. `image_placeholder` returns 501.

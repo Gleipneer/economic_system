@@ -635,6 +635,7 @@ def _ingest_field_guides(records: dict[str, list[dict[str, Any]]]) -> dict[str, 
             "notes": "Sätt null om ett fält inte framgår tydligt. confirmed_fields får bara innehålla säkert lästa fält.",
         },
         "frequency_values": ["monthly", "yearly", "weekly", "biweekly", "daily"],
+        "frequency_notes": "VIKTIGT: bara dessa frekvenser är tillåtna. Kvartal/quarterly finns inte. Använd yearly med beloppet * 4 om originalet är kvartalsvis. Halvår = yearly med beloppet * 2.",
         "subscription_categories": [
             "mobile",
             "broadband",
@@ -650,6 +651,8 @@ def _ingest_field_guides(records: dict[str, list[dict[str, Any]]]) -> dict[str, 
         "recurring_cost_shape": {
             "required": ["category", "amount", "frequency"],
             "optional": ["vendor", "person_id", "mandatory", "variability_class", "controllability", "note"],
+            "variability_class_values": ["fixed", "variable", "semi_variable"],
+            "controllability_values": ["locked", "negotiable", "reducible", "discretionary"],
         },
         "subscription_contract_shape": {
             "required": ["category", "provider", "current_monthly_cost", "billing_frequency"],
