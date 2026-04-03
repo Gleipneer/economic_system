@@ -5,50 +5,52 @@ Last reviewed: 2026-04-03.
 
 ## Next Task
 
-Restore recurring costs as a first-class module in the active frontend.
+Harden LF-style bank copy-paste ingest into a genuinely useful review flow.
 
 ## Why This Comes Next
 
-This is the highest-value gap directly visible in the current product:
+This is the highest-value gap directly visible after the current pass:
 
-- recurring costs are part of the backend model
-- recurring costs affect the summary calculations
-- optimization scan reads recurring costs
-- the active routed frontend does not expose them cleanly
+- the app now has a real OpenAI-backed Data-In surface
+- the next practical user problem is pasted bank data, especially LF-style account export text
+- current ingest is conservative and safe, but it is strongest on simple contract text rather than bank-row interpretation
+- there is still no transaction ledger, so the next step must stay inside the existing planning/workflow model
 
-That means an important household concept exists in the system but is not fully operable from the product surface.
+That makes bank-copy-paste-to-review-draft the next product and AI step with the best user value per unit of risk.
 
 ## What Must Stay Stable
 
 - Keep `app.main:app` as the runtime entrypoint.
 - Keep the current Swedish route-based frontend shell.
 - Keep the global active-household selector.
-- Keep backend API contracts unchanged unless there is a strong reason.
-- Keep summary, reports, scenarios, documents, and assistant flows working as they do now.
+- Keep the current recurring-cost, documents, and assistant flows working as they do now.
+- Keep backend-owned money math out of the model output.
+- Keep AI writes limited to workflow artifacts unless the user explicitly applies a draft later.
 
 ## What Not To Touch In That Pass
 
 - Do not start auth work.
-- Do not start external AI integration.
-- Do not start bank-ingest or finance-core work.
+- Do not start bank sync, bank adapters, or finance core work.
 - Do not split the whole backend into routers/services in the same pass.
 - Do not redesign the whole visual language.
+- Do not collapse Data-In AI and analysis AI into one generic chat.
 
 ## Acceptance Criteria
 
-- The active SPA has a reachable recurring-cost page or equivalent product surface.
-- Existing recurring costs for the selected household can be listed.
-- Users can create, edit, and delete recurring costs through the active frontend.
-- The frontend submission and deletion handlers are wired for recurring costs.
-- The UI keeps the Swedish household-product framing rather than falling back to raw CRUD.
-- Existing backend summary behavior remains unchanged.
-- Documentation is updated if route names or navigation change.
+- LF-like pasted account text with fields such as `bokföringsdatum`, `transaktionsdatum`, `transaktionstext`, `belopp`, and `saldo` can be analysed in the product.
+- The system can classify rows conservatively into likely recurring payment, likely subscription, likely transfer/saving, or unclear.
+- Suggestions are validated and presented as reviewable workflow artifacts, not as silent canonical writes.
+- The UI keeps raw input, AI interpretation, and later canonical application clearly separated.
+- Existing assistant, recurring-cost, subscription, document, and report flows remain stable.
+- Documentation is updated to reflect the real scope of the new ingest behavior.
 
 ## Useful Starting Files
 
 - `app/static/app.js`
+- `app/ai_services.py`
 - `app/static/styles.css`
 - `app/main.py`
 - `app/schemas.py`
-- `docs/FRONTEND_DIRECTION.md`
+- `docs/AI_DIRECTION.md`
 - `docs/CURRENT_STATE.md`
+- `docs/AINEXTSTEPPATCH.md`

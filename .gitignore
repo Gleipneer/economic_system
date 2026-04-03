@@ -15,3 +15,6 @@ venv/
 .idea/
 .vscode/
 *.log
+.playwright-cli/
+.playwright-mcp/
+uploaded_files/

@@ -15,7 +15,8 @@ The repo currently contains one FastAPI app that serves:
 - OpenAPI docs on `/docs`
 - health check on `/healthz`
 - CRUD routes for the current domain entities
-- deterministic summary, housing, scenario, report, document, draft, optimization, and assistant flows
+- deterministic summary, housing, scenario, report, document, draft, and optimization flows
+- OpenAI-backed assistant and Data-In flows when `OPENAI_API_KEY` is configured
 
 ## Manual Validation Checklist
 
@@ -51,6 +52,8 @@ The repo currently contains one FastAPI app that serves:
 1. Create an `ExtractionDraft`.
 2. Apply it with `POST /extraction_drafts/{id}/apply`.
 3. Ask the assistant via `POST /households/{id}/assistant/respond`.
+4. Analyse raw text via `POST /households/{id}/ingest_ai/analyze`.
+5. Promote reviewed suggestions via `POST /households/{id}/ingest_ai/promote`.
 
 ## Automated Coverage Present in Repo
 
@@ -67,15 +70,11 @@ The smoke suite currently covers:
 - report generation
 - optimization scan
 - calculation helpers
+- AI routes fail cleanly with `503` when provider config is missing
 
 ## Current Known Validation Mismatch
 
-As of 2026-04-03:
-
-- `tests/test_smoke.py` still expects the string `Hushållsekonomi`
-- the current frontend branding says `Ekonomi`
-
-That means the smoke suite is not fully green even though the underlying runtime is otherwise present.
+As of 2026-04-03 there is no known local smoke mismatch left in `tests/test_smoke.py`.
 
 ## Explicit Non-Features
 
@@ -83,6 +82,5 @@ Do not validate for these as if they were delivered:
 
 - `POST /demo/seed`
 - auth
-- external AI provider integration
 - bank ingest
 - background workers

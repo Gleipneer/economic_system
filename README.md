@@ -25,8 +25,8 @@ The architecture separates concerns into layers:
 |----------------------|--------------------------------------------------------------------|
 | Database (SQL)       | Persist domain entities in a relational model                       |
 | Backend (FastAPI)    | Provide CRUD operations, workflows and deterministic calculations   |
-| Document Ingestion   | Store raw documents (PDF, images) and create extraction drafts      |
-| Assistant / AI layer | Deterministic household assistant exists today; external AI remains future direction |
+| Document Ingestion   | Store raw documents and create reviewable extraction drafts         |
+| Assistant / AI layer | OpenAI-backed analysis and Data-In flows when configured; explicit failure when provider is missing |
 | Frontend (included)  | Present UI forms, dashboard actions and drive user workflows       |
 
 The included frontend is intentionally lightweight and same-origin. It is
@@ -55,9 +55,12 @@ another client.
 * **Workflow Utilities** – Optimisation scans, extraction draft
   application, scenario execution and report snapshots are available
   for validation and daily use.
-* **Household Assistant** – A built-in assistant endpoint can explain
-  the current household state from stored data. It is deterministic and
-  does not call an external model provider.
+* **Household Assistant** – A read-only household assistant can analyse
+  current household data through OpenAI when `OPENAI_API_KEY` is set.
+  Missing provider configuration is surfaced openly as a runtime error.
+* **Data-In AI** – The documents page can analyse pasted raw text,
+  validate structured suggestions and create workflow drafts only after
+  an explicit promote step.
 * **SQLite by Default** – A local SQLite database is used by default so
   the backend works out of the box. The `DATABASE_URL` environment
   variable allows migration to PostgreSQL or another RDBMS without code
@@ -97,15 +100,30 @@ If the host machine is connected to Tailscale and the service binds to
 ```bash
 git clone <repository-url>
 cd economic_system
+./scripts/start_app.sh
+```
+
+The start script:
+
+* creates or reuses `venv/`
+* installs dependencies
+* runs `alembic upgrade head`
+* picks the next free port if `APP_PORT` is already occupied
+* prints both local and Tailscale URLs when available
+
+Manual start still works:
+
+```bash
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
-uvicorn app.main:app --reload
+alembic upgrade head
+uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-By default the application writes its SQLite database to `database.db` in
-the project root. Set `DATABASE_URL` in your shell to point at another
-database if needed.
+By default the application writes its SQLite database to `database.db`
+in the project root. Set `DATABASE_URL` in your shell to point at
+another database if needed.
 
 Open the UI at `http://localhost:8000/` and the API docs at
 `http://localhost:8000/docs`.
@@ -155,6 +173,12 @@ creation timestamp.
 | UPLOAD_DIR         | ./uploaded_files         | Root directory for uploaded documents                             |
 | CORS_ALLOW_ORIGINS | *                        | Comma-separated allowed origins for CORS                          |
 | AUTO_CREATE_SCHEMA | true                     | Keeps local/test bootstrap via `create_all`; production should migrate |
+| OPENAI_API_KEY     | unset                    | Enables live OpenAI calls for the assistant and Data-In AI        |
+| OPENAI_MODEL       | gpt-5.4                  | Shared fallback model if flow-specific model vars are unset       |
+| OPENAI_ANALYSIS_MODEL | unset                 | Optional model override for `/households/{id}/assistant/respond`  |
+| OPENAI_INGEST_MODEL | unset                   | Optional model override for `/households/{id}/ingest_ai/...`      |
+| OPENAI_BASE_URL    | unset                    | Optional override for an OpenAI-compatible base URL               |
+| OPENAI_TIMEOUT_SECONDS | 45                   | Timeout for OpenAI Responses API calls                            |
 
 ## Project Structure
 
@@ -162,6 +186,7 @@ creation timestamp.
 economic_system/
 ├── app/
 │   ├── __init__.py
+│   ├── ai_services.py # OpenAI integration and AI flow orchestration
 │   ├── main.py        # FastAPI application and routers
 │   ├── models.py      # SQLAlchemy ORM models
 │   ├── schemas.py     # Pydantic schemas for API IO
@@ -171,7 +196,11 @@ economic_system/
 │   ├── CURRENT_STATE.md       # Strict current implementation truth
 │   ├── ARCHITECTURE.md        # Canonical technical architecture
 │   ├── FRONTEND_DIRECTION.md  # Frontend product direction
+│   ├── AI_DIRECTION.md        # Current AI truth and future boundary
+│   ├── AINEXTSTEPPATCH.md     # Recommended next large patch
 │   └── frontend_schema.md     # API and data schema supplement
+├── scripts/
+│   └── start_app.sh           # Local start script with migration + port fallback
 ├── tests/
 │   └── test_smoke.py          # Runtime smoke and workflow verification
 ├── Dockerfile
@@ -192,8 +221,8 @@ Frontend developers should start with `docs/HANDOFF_MASTER.md`,
   beyond a trusted private network.
 * Tighten migration discipline now that Alembic exists and
   `AUTO_CREATE_SCHEMA` still remains available as a local fallback.
-* Integrate external AI providers for automatic extraction and
-  optimisation generation.
+* Harden the LF-style bank copy-paste ingest flow without pretending the
+  app is already a bank-sync ledger.
 * Add background jobs for reminders and periodic processing.
 * Add production logging/metrics if you deploy beyond household scale.
 

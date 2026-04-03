@@ -33,7 +33,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 
-from . import calculations, database, models, schemas
+from . import ai_services, calculations, database, models, schemas
 from .settings import get_settings
 
 settings = get_settings()
@@ -130,97 +130,6 @@ def draft_target_config(target_entity_type: str):
     if normalized not in mapping:
         raise HTTPException(status_code=400, detail=f"Unsupported draft target_entity_type: {target_entity_type}")
     return mapping[normalized], normalized
-
-
-def build_assistant_answer(db: Session, household_id: int, prompt: str) -> str:
-    records = calculations.load_household_records(db, household_id)
-    summary = calculations.build_household_summary(records, household_id)
-    subscriptions = records["subscription_contracts"]
-    opportunities = sorted(
-        records["optimization_opportunities"],
-        key=lambda item: float(item.get("estimated_monthly_saving") or 0.0),
-        reverse=True,
-    )
-    housing = db.query(models.HousingScenario).filter_by(household_id=household_id).order_by(models.HousingScenario.id.asc()).all()
-    documents = records["documents"]
-    drafts = [item for item in records["extraction_drafts"] if item.get("status") == "pending_review"]
-
-    lines: list[str] = [
-        f"**Månadsinkomst:** {round(summary['monthly_income'], 0):.0f} kr",
-        f"**Månadskostnader:** {round(summary['monthly_total_expenses'], 0):.0f} kr",
-        f"**Kvar efter kostnader:** {round(summary['monthly_net_cashflow'], 0):.0f} kr",
-        "",
-    ]
-
-    prompt_lower = prompt.lower()
-    if "boende" in prompt_lower or "bostad" in prompt_lower:
-        if housing:
-            latest = housing[-1]
-            evaluation = calculations.evaluate_housing_scenario(latest)
-            lines.extend(
-                [
-                    "### Boendekalkyl",
-                    f"- Senaste scenario: **{evaluation['label']}**",
-                    f"- Månadskostnad: **{round(evaluation['monthly_total_cost'], 0):.0f} kr**",
-                    f"- Årskostnad: **{round(evaluation['yearly_total_cost'], 0):.0f} kr**",
-                    f"- Kvar efter boendet: **{round(summary['monthly_net_cashflow'] - evaluation['monthly_total_cost'], 0):.0f} kr**",
-                ]
-            )
-        else:
-            lines.extend(
-                [
-                    "### Boendekalkyl",
-                    "- Det finns ännu inget sparat boendescenario att förklara.",
-                    "- Skapa ett boendescenario så kan jag sammanfatta kalkylen med riktiga siffror.",
-                ]
-            )
-    elif "abonnemang" in prompt_lower or "avtal" in prompt_lower:
-        lines.append("### Abonnemang och avtal")
-        if subscriptions:
-            ranked = sorted(
-                subscriptions,
-                key=lambda item: (
-                    float(item.get("ordinary_cost") or 0.0) - float(item.get("current_monthly_cost") or 0.0),
-                    float(item.get("current_monthly_cost") or 0.0),
-                ),
-                reverse=True,
-            )[:3]
-            for item in ranked:
-                current_cost = float(item.get("current_monthly_cost") or 0.0)
-                ordinary_cost = float(item.get("ordinary_cost") or 0.0)
-                delta = ordinary_cost - current_cost if ordinary_cost > current_cost else 0.0
-                action = "Granska snarast" if delta > 0 else "Behåll under uppsikt"
-                lines.append(
-                    f"- **{item.get('provider')} {item.get('product_name') or ''}**: {round(current_cost, 0):.0f} kr/mån. {action}.{f' Ordinarie pris är {round(ordinary_cost, 0):.0f} kr/mån.' if delta else ''}"
-                )
-        else:
-            lines.append("- Det finns inga abonnemang registrerade ännu.")
-    elif "risk" in prompt_lower:
-        lines.append("### Största risker just nu")
-        if summary["monthly_net_cashflow"] < 0:
-            lines.append("- Hushållet går back varje månad. Börja med lån, abonnemang och återkommande kostnader.")
-        if summary["gross_income_only_entries"] > 0:
-            lines.append("- Minst en inkomst saknar nettobelopp. Kassaflödet är därför mindre säkert.")
-        if drafts:
-            lines.append(f"- Det finns **{len(drafts)}** dokumentutkast som väntar på granskning.")
-        if len(lines) == 5:
-            lines.append("- Jag ser ingen akut varningssignal i de registrerade siffrorna just nu.")
-    else:
-        lines.append("### Det viktigaste just nu")
-        if opportunities:
-            for index, item in enumerate(opportunities[:3], start=1):
-                lines.append(
-                    f"{index}. **{item.get('title')}** — uppskattad besparing **{round(float(item.get('estimated_monthly_saving') or 0.0), 0):.0f} kr/mån**."
-                )
-        else:
-            lines.append("- Det finns ännu inga sparade förbättringsförslag. Kör en ny skanning för att få riktiga rekommendationer.")
-        if documents:
-            lines.append(f"- Registrerade dokument: **{len(documents)}**")
-        if drafts:
-            lines.append(f"- Utkast att granska: **{len(drafts)}**")
-
-    return "\n".join(lines)
-
 
 def create_or_get_opportunity(
     db: Session,
@@ -1092,11 +1001,68 @@ def household_assistant_respond(
     db: Session = Depends(get_db),
 ):
     ensure_household_exists(db, household_id)
+    try:
+        answer, model_name, usage = ai_services.generate_analysis_answer(
+            db,
+            household_id,
+            request_body.prompt,
+            settings,
+        )
+    except ai_services.AIProviderUnavailableError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+    except ai_services.AIProviderResponseError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+
     return {
         "household_id": household_id,
         "prompt": request_body.prompt,
-        "answer": build_assistant_answer(db, household_id, request_body.prompt),
+        "answer": answer,
+        "provider": "openai",
+        "model": model_name,
+        "usage": usage,
     }
+
+
+@app.post(
+    "/households/{household_id}/ingest_ai/analyze",
+    response_model=schemas.IngestAnalyzeResponse,
+)
+def household_ingest_ai_analyze(
+    household_id: int,
+    request_body: schemas.IngestAnalyzeRequest,
+    db: Session = Depends(get_db),
+):
+    ensure_household_exists(db, household_id)
+    try:
+        response, _ = ai_services.analyze_ingest_input(
+            db,
+            household_id,
+            input_text=request_body.input_text,
+            input_kind=request_body.input_kind or "unknown",
+            source_name=request_body.source_name,
+            settings=settings,
+        )
+        return response
+    except ai_services.AIProviderUnavailableError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+    except ai_services.AIProviderResponseError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+
+
+@app.post(
+    "/households/{household_id}/ingest_ai/promote",
+    response_model=schemas.IngestPromoteResponse,
+)
+def household_ingest_ai_promote(
+    household_id: int,
+    request_body: schemas.IngestPromoteRequest,
+    db: Session = Depends(get_db),
+):
+    ensure_household_exists(db, household_id)
+    try:
+        return ai_services.promote_ingest_suggestions(db, household_id, request_body)
+    except ai_services.AIProviderResponseError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
 
 @app.get("/{frontend_path:path}", include_in_schema=False)

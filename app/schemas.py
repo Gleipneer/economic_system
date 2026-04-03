@@ -14,7 +14,7 @@ responses by composing nested schemas explicitly.
 """
 
 from datetime import date, datetime
-from typing import Optional, List, Any, Dict
+from typing import Optional, List, Any, Dict, Literal
 from pydantic import BaseModel, Field
 
 from .models import IncomeFrequency, LoanRepaymentModel, VariabilityClass, Controllability, SubscriptionCategory
@@ -754,7 +754,70 @@ class AssistantPromptRequest(BaseModel):
     conversation: list[AssistantMessageRead] | None = None
 
 
+class AIUsageRead(BaseModel):
+    input_tokens: Optional[int] = None
+    output_tokens: Optional[int] = None
+    total_tokens: Optional[int] = None
+
+
 class AssistantPromptResponse(BaseModel):
     household_id: int
     prompt: str
     answer: str
+    provider: str
+    model: str
+    usage: Optional[AIUsageRead] = None
+
+
+class IngestSuggestionRead(BaseModel):
+    target_entity_type: Literal["recurring_cost", "subscription_contract", "loan", "income_source"]
+    title: str
+    rationale: str
+    confidence: Optional[float] = None
+    proposed_json: Dict[str, Any]
+    validation_status: Literal["valid", "invalid"] = "valid"
+    validation_errors: List[str] = Field(default_factory=list)
+    uncertainty_notes: List[str] = Field(default_factory=list)
+
+
+class IngestAnalyzeRequest(BaseModel):
+    input_text: str
+    input_kind: Optional[str] = Field(default="unknown")
+    source_name: Optional[str] = None
+
+
+class IngestAnalyzeResponse(BaseModel):
+    household_id: int
+    source_name: Optional[str] = None
+    input_kind: str
+    detected_kind: str
+    summary: str
+    guidance: List[str] = Field(default_factory=list)
+    suggestions: List[IngestSuggestionRead] = Field(default_factory=list)
+    provider: str
+    model: str
+    usage: Optional[AIUsageRead] = None
+
+
+class IngestPromoteRequest(BaseModel):
+    input_text: str
+    input_kind: Optional[str] = Field(default="unknown")
+    source_name: Optional[str] = None
+    provider: Optional[str] = None
+    model: Optional[str] = None
+    suggestions: List[IngestSuggestionRead] = Field(default_factory=list)
+
+
+class CreatedDraftRead(BaseModel):
+    draft_id: int
+    target_entity_type: str
+    confidence: Optional[float] = None
+    validation_status: str
+
+
+class IngestPromoteResponse(BaseModel):
+    household_id: int
+    document_id: int
+    document_type: str
+    created_drafts: List[CreatedDraftRead] = Field(default_factory=list)
+    skipped_suggestions: int = 0

@@ -13,17 +13,19 @@ Major runtime layers:
 2. SQLAlchemy data model and sessions
 3. FastAPI routes
 4. deterministic calculation helpers
-5. static SPA assets
-6. Alembic migrations
+5. AI service layer for OpenAI-backed analysis and ingest
+6. static SPA assets
+7. Alembic migrations
 
 ## Core Application Structure
 
 ### Backend Core
 
-- `app/main.py`: primary FastAPI app, route definitions, startup, file upload logic, assistant response assembly
+- `app/main.py`: primary FastAPI app, route definitions, startup, file upload logic, and AI route wiring
 - `app/models.py`: SQLAlchemy ORM model definitions
 - `app/schemas.py`: Pydantic request/response schemas
 - `app/calculations.py`: deterministic summary, housing, scenario, and helper math
+- `app/ai_services.py`: OpenAI call wrapper, compact context building, ingest validation, and draft-promotion helpers
 - `app/database.py`: engine, session factory, `Base`, optional schema bootstrap
 - `app/settings.py`: environment-backed settings
 
@@ -38,6 +40,7 @@ Major runtime layers:
 - `alembic/`: migration environment and baseline schema revision
 - `Dockerfile`: container runtime path
 - `docker-compose.yml`: local container orchestration
+- `scripts/start_app.sh`: preferred local start path with migration step and port fallback
 - `tests/test_smoke.py`: backend smoke coverage
 
 ## Data Model Shape
@@ -96,6 +99,16 @@ The current data model groups into these layers:
 3. backend stores a `Document` row with checksum and storage path
 4. `GET /documents/{id}/download` serves the file back from disk
 
+### Data-In AI Flow
+
+1. client sends raw text to `POST /households/{id}/ingest_ai/analyze`
+2. backend passes only relevant household scope and raw text to `app/ai_services.py`
+3. OpenAI returns structured output through the Responses API
+4. backend validates each suggestion against typed create schemas
+5. client can explicitly call `POST /households/{id}/ingest_ai/promote`
+6. backend stores one `Document` plus one or more `ExtractionDraft` rows
+7. canonical finance tables remain untouched until a later explicit `extraction_drafts/{id}/apply`
+
 ### Household Summary Flow
 
 1. backend loads household-scoped records
@@ -126,9 +139,9 @@ The current data model groups into these layers:
 ### Assistant Flow
 
 1. client sends a prompt to `POST /households/{id}/assistant/respond`
-2. backend loads household records and summary
-3. prompt keywords decide which templated answer section to produce
-4. response is returned as plain text markdown-ish content
+2. backend builds a compact read model from household records and summary
+3. `app/ai_services.py` calls the OpenAI Responses API
+4. response is returned as answer text plus provider/model/usage metadata
 
 ## Current Architectural Truth
 
@@ -156,5 +169,6 @@ That is only a possible future fit. It is not a current repo commitment.
 
 - `app/main.py` is large and owns almost all route logic
 - `app/static/app.js` contains both older and newer UI strata in one file
-- recurring costs are modeled and summarized, but the active frontend route set does not expose them cleanly
+- `app/ai_services.py` is directly coupled to OpenAI rather than a provider abstraction
+- the active frontend now exposes recurring costs, but the file still contains duplicated legacy and active handlers
 - `app/static/server.py` and `app/system_docs.py` exist as side artifacts, not as the primary architecture

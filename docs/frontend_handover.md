@@ -14,5 +14,5 @@ Frontend readers should now use this order:
 Important current truth:
 
 - the active frontend has more routed modules than this file used to describe
-- recurring costs exist in the backend but are not first-class in the active routed SPA
+- recurring costs are now first-class in the active routed SPA
 - the assistant is a real current frontend feature

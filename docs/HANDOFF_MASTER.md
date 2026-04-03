@@ -11,11 +11,13 @@ It already has:
 
 - structured household finance CRUD
 - deterministic summaries and housing calculations
+- first-class recurring-cost UX in the active SPA
 - scenario execution
 - report snapshots
 - document upload/download
 - extraction drafts and optimization opportunities
 - a real assistant endpoint
+- a real Data-In AI flow for raw text -> validated suggestions -> explicit draft promotion
 
 It is still a planning/snapshot system, not a bank-ingest or finance-core system.
 
@@ -25,24 +27,28 @@ It is still a planning/snapshot system, not a bank-ingest or finance-core system
 - The main runtime is `app.main:app`.
 - Core finance calculations stay backend-owned.
 - AI-like behavior must remain explicit and non-silent relative to canonical data.
-- Do not claim missing features such as `POST /demo/seed`, bank ingest, or external AI integration.
+- Analysis AI and Data-In AI are separate surfaces.
+- Do not claim missing features such as `POST /demo/seed`, bank ingest, or finance core.
 
 ## What Exists
 
 - same-origin SPA with routed household pages
 - backend CRUD for current domain entities
 - summary, optimization, housing evaluation, scenario, report, document, draft, and assistant flows
+- OpenAI-backed analysis AI when provider env is configured
+- OpenAI-backed Data-In AI plus explicit promote-to-draft flow when provider env is configured
 - Alembic baseline migration
 - Docker and local runtime paths
+- `scripts/start_app.sh` with migration step, port fallback, and Tailscale URL output
 
 ## What Is Missing
 
 - auth
-- external AI provider integration
 - bank adapters and transaction ingest
 - background jobs
 - observability beyond a basic health check
-- first-class active frontend support for recurring costs
+- provider abstraction beyond the direct OpenAI integration
+- LF-style bank copy-paste ingest that produces genuinely useful review drafts
 
 ## Exact Read Order
 
@@ -61,11 +67,12 @@ It is still a planning/snapshot system, not a bank-ingest or finance-core system
 
 ## Next Recommended Task
 
-Make recurring costs reachable and fully operable in the active frontend without destabilizing the current routed shell.
+Harden LF-style bank copy-paste ingest so raw pasted account data can become conservative, reviewable workflow drafts without pretending the app already has a transaction ledger.
 
 See:
 
 - `docs/NEXT_ACTION.md`
+- `docs/AINEXTSTEPPATCH.md`
 
 ## Final Truth Rule
 

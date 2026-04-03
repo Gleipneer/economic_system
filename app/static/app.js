@@ -1811,6 +1811,22 @@ async function handlePageClick(event) {
     return;
   }
 
+  const promoteIngestTarget = event.target.closest("[data-action='promote-ingest']");
+  if (promoteIngestTarget) {
+    await promoteIngestSuggestions();
+    return;
+  }
+
+  const clearIngestTarget = event.target.closest("[data-action='clear-ingest']");
+  if (clearIngestTarget) {
+    state.ui.ingestInput = "";
+    state.ui.ingestKind = "unknown";
+    state.ui.ingestSourceName = "";
+    state.ui.ingestResult = null;
+    render();
+    return;
+  }
+
   const resetTarget = event.target.closest("[data-reset-form]");
   if (resetTarget) {
     resetFormState(resetTarget.dataset.resetForm);
@@ -2146,7 +2162,15 @@ function showToast(message, tone = "success") {
 }
 
 function readError(error) {
-  if (error instanceof Error) return error.message;
+  if (error instanceof Error) {
+    try {
+      const parsed = JSON.parse(error.message);
+      if (parsed?.detail) return parsed.detail;
+    } catch (_ignored) {
+      // Fall through to the original message when the backend returned plain text.
+    }
+    return error.message;
+  }
   return String(error);
 }
 
@@ -2156,6 +2180,8 @@ Object.assign(API, {
   scenarioResults: "/scenario_results",
   reports: "/report_snapshots",
   assistant: "/assistant/respond",
+  ingestAnalyze: "/ingest_ai/analyze",
+  ingestPromote: "/ingest_ai/promote",
 });
 
 PAGES.splice(
@@ -2166,6 +2192,7 @@ PAGES.splice(
   { key: "persons", label: "Personer", path: "/personer" },
   { key: "incomes", label: "Inkomster", path: "/inkomster" },
   { key: "loans", label: "Lån", path: "/lan" },
+  { key: "costs", label: "Återkommande kostnader", path: "/kostnader" },
   { key: "subscriptions", label: "Abonnemang och avtal", path: "/abonnemang" },
   { key: "insurance", label: "Försäkringar", path: "/forsakringar" },
   { key: "vehicles", label: "Fordon", path: "/fordon" },
@@ -2192,6 +2219,12 @@ state.ui = {
   assistantMessages: [],
   assistantInput: "",
   assistantPending: false,
+  ingestInput: "",
+  ingestKind: "unknown",
+  ingestSourceName: "",
+  ingestPending: false,
+  ingestPromoting: false,
+  ingestResult: null,
 };
 
 state.editing.scenario = null;
@@ -2248,6 +2281,8 @@ function bindBaseEvents() {
     state.selectedHouseholdId = Number(event.target.value) || null;
     persistSelection();
     clearEdits();
+    state.ui.assistantMessages = [];
+    state.ui.ingestResult = null;
     await ensureSummaryLoaded();
     render();
   });
@@ -2349,6 +2384,7 @@ function navGlyph(key) {
     persons: "☺",
     incomes: "₿",
     loans: "¤",
+    costs: "≈",
     subscriptions: "☰",
     insurance: "⛨",
     vehicles: "▣",
@@ -2377,6 +2413,8 @@ function renderPage() {
       return renderIncomesPage();
     case "loans":
       return renderLoansPage();
+    case "costs":
+      return renderRecurringCostsPageV2();
     case "subscriptions":
       return renderSubscriptionsPageV2();
     case "insurance":
@@ -2708,6 +2746,56 @@ function renderLoansPage() {
   `;
 }
 
+function renderRecurringCostsPageV2() {
+  const items = recurringCostsForHousehold();
+  const monthlyTotal = sum(items.map((item) => amountToMonthlyCost(item)));
+  const mandatoryCount = items.filter((item) => item.mandatory !== false).length;
+  const reducibleMonthly = sum(
+    items
+      .filter((item) => ["negotiable", "reducible", "discretionary"].includes(String(item.controllability)))
+      .map((item) => amountToMonthlyCost(item))
+  );
+  return `
+    <section class="page-wrap">
+      ${renderPageHeader(
+        "Återkommande kostnader",
+        "Månadsposter som inte är abonnemang eller försäkringar",
+        `<button class="primary" type="button" data-action="new-record" data-module="cost">Lägg till kostnad</button>`
+      )}
+      <section class="stats-grid">
+        ${renderStatCard("Poster", items.length)}
+        ${renderStatCard("Total kostnad / månad", money(monthlyTotal))}
+        ${renderStatCard("Nödvändiga poster", mandatoryCount)}
+        ${renderStatCard("Möjliga att påverka", money(reducibleMonthly))}
+      </section>
+      <section class="split-layout">
+        <article class="panel">
+          <div class="section-head">
+            <div>
+              <span class="section-eyebrow">Kostnadslista</span>
+              <h3>${items.length ? `${items.length} återkommande poster` : "Lägg till första återkommande kostnaden"}</h3>
+              <p class="meta-text">Här ligger till exempel avbetalningar, fasta familjeposter och andra återkommande kostnader. Försäkringar har en egen modul.</p>
+            </div>
+          </div>
+          <div class="record-grid">
+            ${items.map((item) => renderRecurringCostCard(item)).join("") || `<div class="empty-state"><p>Inga återkommande kostnader registrerade ännu.</p></div>`}
+          </div>
+        </article>
+        <article class="panel form-card">
+          <span class="section-eyebrow">Kostnad</span>
+          <h3>${currentEdit("cost")?.id ? "Redigera återkommande kostnad" : "Lägg till återkommande kostnad"}</h3>
+          <p class="muted">Backend fortsätter äga summeringen. Här registrerar ni bara posten, inte själva ekonomimatematiken.</p>
+          ${renderForm("costForm", recurringCostFields(), currentEdit("cost") || {}, {
+            submitLabel: currentEdit("cost")?.id ? "Spara kostnad" : "Lägg till kostnad",
+            canDelete: Boolean(currentEdit("cost")?.id),
+            deleteLabel: "Ta bort kostnad",
+          })}
+        </article>
+      </section>
+    </section>
+  `;
+}
+
 function renderSubscriptionsPageV2() {
   const items = subscriptionsForHousehold();
   return `
@@ -2936,6 +3024,65 @@ function renderHousingPageV2() {
   `;
 }
 
+function ingestKindOptions() {
+  return [
+    ["unknown", "Oklart underlag"],
+    ["bank_copy_paste", "Kontoutdrag / bank-copy-paste"],
+    ["subscription_contract", "Avtal eller abonnemangstext"],
+    ["invoice_or_bill", "Faktura eller räkning"],
+    ["financial_note", "Fri ekonomitext"],
+  ];
+}
+
+function renderIngestSuggestionCard(item) {
+  const confidence = item.confidence == null ? "Ej angiven" : number(item.confidence, 2);
+  return `
+    <article class="record-card">
+      <div class="record-title-row">
+        <div>
+          <h4 class="record-title">${escapeHtml(item.title)}</h4>
+          <p class="muted">${escapeHtml(item.target_entity_type)} · confidence ${escapeHtml(confidence)}</p>
+        </div>
+        <span class="badge ${item.validation_status === "valid" ? "success" : "warning"}">${escapeHtml(item.validation_status)}</span>
+      </div>
+      <p class="muted">${escapeHtml(item.rationale)}</p>
+      ${item.uncertainty_notes?.length ? `<p class="muted">Osäkerhet: ${escapeHtml(item.uncertainty_notes.join(" · "))}</p>` : ""}
+      ${item.validation_errors?.length ? `<p class="muted">Validering: ${escapeHtml(item.validation_errors.join(" · "))}</p>` : ""}
+      <pre>${escapeHtml(JSON.stringify(item.proposed_json, null, 2))}</pre>
+    </article>
+  `;
+}
+
+function renderIngestResult() {
+  const result = state.ui.ingestResult;
+  if (!result) {
+    return `<div class="empty-state"><p>Ingen AI-analys körd ännu. Klistra in underlag och kör analys när ni vill skapa reviewutkast utan tysta databasskrivningar.</p></div>`;
+  }
+
+  const validSuggestions = result.suggestions.filter((item) => item.validation_status === "valid");
+  return `
+    <div class="record-grid">
+      <article class="record-card">
+        <div class="record-title-row">
+          <div>
+            <h4 class="record-title">${escapeHtml(result.summary)}</h4>
+            <p class="muted">${escapeHtml(result.detected_kind)} · ${escapeHtml(result.provider)} · ${escapeHtml(result.model)}</p>
+          </div>
+          <span class="badge">${result.usage?.total_tokens ? `${result.usage.total_tokens} tokens` : "utan usage"}</span>
+        </div>
+        ${result.guidance?.length ? `<p class="muted">${escapeHtml(result.guidance.join(" · "))}</p>` : ""}
+        <div class="actions-row">
+          <button class="primary" type="button" data-action="promote-ingest" ${validSuggestions.length ? "" : "disabled"}>
+            ${state.ui.ingestPromoting ? "Skapar utkast..." : "Skapa reviewutkast"}
+          </button>
+          <span class="chat-disclaimer">Detta skapar bara reviewutkast i workflow-lagret. Inget skrivs direkt till kanonisk ekonomi.</span>
+        </div>
+      </article>
+      ${result.suggestions.map((item) => renderIngestSuggestionCard(item)).join("") || `<div class="empty-state"><p>Inga säkra strukturerade förslag hittades i underlaget.</p></div>`}
+    </div>
+  `;
+}
+
 function renderDocumentsPageV2() {
   const items = documentsForHousehold();
   const drafts = draftsForHousehold();
@@ -2950,6 +3097,29 @@ function renderDocumentsPageV2() {
             ${renderDocumentUploadForm()}
           </div>
         </article>
+        <article class="panel form-card">
+          <span class="section-eyebrow">Data-In AI</span>
+          <h3>Skapa konservativa reviewutkast från råtext</h3>
+          <p class="muted">Klistra in bankrader, avtalsvillkor eller annan råtext. AI:n klassificerar underlaget, föreslår strukturerade poster och kräver sedan ett separat promote-steg innan reviewutkast skapas.</p>
+          <form id="ingestAnalyzeForm" class="form-grid">
+            ${renderField({ key: "ingest_input_kind", label: "Typ av underlag", type: "select", options: ingestKindOptions(), required: true }, state.ui.ingestKind || "unknown")}
+            ${renderField({ key: "ingest_source_name", label: "Källa eller avsändare", type: "text" }, state.ui.ingestSourceName || "")}
+            ${renderField({ key: "ingest_input_text", label: "Råtext", type: "textarea", full: true, required: true }, state.ui.ingestInput || "")}
+            <div class="field full">
+              <div class="form-actions">
+                <button class="primary" type="submit" ${selectedHousehold() ? "" : "disabled"}>${state.ui.ingestPending ? "Analyserar..." : "Analysera underlag"}</button>
+                <button class="ghost" type="button" data-action="clear-ingest">Rensa</button>
+              </div>
+            </div>
+          </form>
+        </article>
+      </section>
+      <article class="panel">
+        <span class="section-eyebrow">AI-resultat</span>
+        <h3>Förslag som kan bli reviewutkast</h3>
+        ${renderIngestResult()}
+      </article>
+      <section class="split-layout">
         <article class="panel">
           <span class="section-eyebrow">Alla dokument</span>
           <h3>${items.length ? `${items.length} dokument` : "Inga dokument ännu"}</h3>
@@ -2957,28 +3127,28 @@ function renderDocumentsPageV2() {
             ${items.map((item) => renderDocumentRowV2(item)).join("") || `<div class="empty-state"><p>Inga dokument uppladdade ännu.</p></div>`}
           </div>
         </article>
+        <article class="panel">
+          <span class="section-eyebrow">Reviewutkast</span>
+          <h3>${drafts.length ? `${drafts.length} utkast att granska` : "Inga utkast att granska"}</h3>
+          <div class="record-grid">
+            ${drafts.map((draft) => `
+              <article class="record-card">
+                <div class="record-title-row">
+                  <div>
+                    <h4 class="record-title">${escapeHtml(draft.target_entity_type)}</h4>
+                    <p class="muted">Dokument ${draft.document_id} · status ${escapeHtml(draft.status)}</p>
+                  </div>
+                  <div class="actions-row">
+                    <button class="primary compact" type="button" data-apply-draft="${draft.id}">Applicera</button>
+                    <button class="danger compact" type="button" data-delete-draft="${draft.id}">Avvisa</button>
+                  </div>
+                </div>
+                <pre>${escapeHtml(JSON.stringify(draft.proposed_json, null, 2))}</pre>
+              </article>
+            `).join("") || `<div class="empty-state"><p>Det finns inga väntande reviewutkast.</p></div>`}
+          </div>
+        </article>
       </section>
-      <article class="panel">
-        <span class="section-eyebrow">Extraction drafts</span>
-        <h3>${drafts.length ? `${drafts.length} utkast att granska` : "Inga utkast att granska"}</h3>
-        <div class="record-grid">
-          ${drafts.map((draft) => `
-            <article class="record-card">
-              <div class="record-title-row">
-                <div>
-                  <h4 class="record-title">${escapeHtml(draft.target_entity_type)}</h4>
-                  <p class="muted">Dokument ${draft.document_id} · status ${escapeHtml(draft.status)}</p>
-                </div>
-                <div class="actions-row">
-                  <button class="primary compact" type="button" data-apply-draft="${draft.id}">Applicera</button>
-                  <button class="danger compact" type="button" data-delete-draft="${draft.id}">Ta bort</button>
-                </div>
-              </div>
-              <pre>${escapeHtml(JSON.stringify(draft.proposed_json, null, 2))}</pre>
-            </article>
-          `).join("") || `<div class="empty-state"><p>Det finns inga väntande extraction drafts.</p></div>`}
-        </div>
-      </article>
     </section>
   `;
 }
@@ -3161,19 +3331,19 @@ function renderAssistantPageV2() {
   ];
   return `
     <section class="page-wrap">
-      ${renderPageHeader("Ekonomiassistent", "Ställ frågor om er ekonomi och få svar baserade på riktiga hushållsdata.")}
+      ${renderPageHeader("Ekonomiassistent", "Read-only AI över hushållets riktiga data. Svar kan misslyckas öppet om provider saknas eller svar inte går att validera.")}
       <article class="panel chat-shell">
         <div class="prompt-grid">
           ${prompts.map((prompt) => `<button class="prompt-chip" type="button" data-prompt="${escapeHtml(prompt)}">${escapeHtml(prompt)}</button>`).join("")}
         </div>
         <div class="chat-log">
-          ${messages.length ? messages.map(renderAssistantMessage).join("") : `<div class="chat-empty"><div><h3>Ekonomiassistent</h3><p class="muted">Svaren bygger på hushållets riktiga data, rapporter, dokument och förbättringsförslag.</p></div></div>`}
+          ${messages.length ? messages.map(renderAssistantMessage).join("") : `<div class="chat-empty"><div><h3>Ekonomiassistent</h3><p class="muted">Svar bygger på hushållets read models. AI:n är read-only och får inte skriva till kärndata.</p></div></div>`}
         </div>
         <form id="assistantForm" class="chat-composer">
           <textarea name="prompt" placeholder="Ställ en fråga om hushållets ekonomi...">${escapeHtml(state.ui.assistantInput || "")}</textarea>
           <div class="actions-row">
             <button class="primary" type="submit" ${selectedHousehold() ? "" : "disabled"}>${state.ui.assistantPending ? "Analyserar..." : "Skicka fråga"}</button>
-            <span class="chat-disclaimer">Inga mockade svar används här. Om hushållet saknar data säger assistenten det.</span>
+            <span class="chat-disclaimer">Inga låtsassvar används här. Vid saknad provider eller valideringsfel visas öppet fel.</span>
           </div>
         </form>
       </article>
@@ -3186,6 +3356,7 @@ function renderAssistantMessage(message) {
     <article class="chat-message ${message.role}">
       <div class="chat-role">${message.role === "assistant" ? "Ekonomiassistent" : "Du"}</div>
       <div class="chat-bubble">${renderAssistantMarkdown(message.content)}</div>
+      ${message.role === "assistant" && message.model ? `<div class="muted">${escapeHtml(message.provider || "openai")} · ${escapeHtml(message.model)}${message.usage?.total_tokens ? ` · ${message.usage.total_tokens} tokens` : ""}</div>` : ""}
     </article>
   `;
 }
@@ -3206,7 +3377,7 @@ function renderRegisterPage() {
       <article class="wizard-card">
         <div class="wizard-progress">
           <div class="wizard-steps">
-            ${["Hushåll", "Personer", "Inkomster", "Lån", "Abonnemang", "Tillgångar", "Boende", "Rapport", "Klart"].map((_, index) => `<div class="wizard-step ${index < steps.length ? "active" : "done"}"></div>`).join("")}
+            ${["Hushåll", "Personer", "Inkomster", "Lån", "Kostnader", "Abonnemang", "Tillgångar", "Boende", "Rapport", "Klart"].map((_, index) => `<div class="wizard-step ${index < steps.length ? "active" : "done"}"></div>`).join("")}
           </div>
           <p class="muted">Den här guidade vyn använder samma riktiga CRUD-flöden som övriga appen. Lägg först grunden, sedan resten stegvis.</p>
         </div>
@@ -3215,10 +3386,11 @@ function renderRegisterPage() {
           <button class="choice-card" type="button" data-route="/personer"><strong>2. Lägg till personer</strong><br><span class="muted">Koppla hushållets personer.</span></button>
           <button class="choice-card" type="button" data-route="/inkomster"><strong>3. Fyll inkomster</strong><br><span class="muted">Skapa riktiga inkomster per person.</span></button>
           <button class="choice-card" type="button" data-route="/lan"><strong>4. Lägg till lån</strong><br><span class="muted">Samla skulder och månadskostnader.</span></button>
-          <button class="choice-card" type="button" data-route="/abonnemang"><strong>5. Lägg till abonnemang</strong><br><span class="muted">Avtal, bindningar och granskningsdatum.</span></button>
-          <button class="choice-card" type="button" data-route="/tillgangar"><strong>6. Lägg till tillgångar</strong><br><span class="muted">Konton, sparande och investeringar.</span></button>
-          <button class="choice-card" type="button" data-route="/boendekalkyl"><strong>7. Skapa boendekalkyl</strong><br><span class="muted">Kalkyl mot riktiga kostnader.</span></button>
-          <button class="choice-card" type="button" data-route="/rapporter"><strong>8. Generera rapport</strong><br><span class="muted">Skapa första riktiga snapshoten.</span></button>
+          <button class="choice-card" type="button" data-route="/kostnader"><strong>5. Lägg till återkommande kostnader</strong><br><span class="muted">Fasta poster och avbetalningar som inte är abonnemang.</span></button>
+          <button class="choice-card" type="button" data-route="/abonnemang"><strong>6. Lägg till abonnemang</strong><br><span class="muted">Avtal, bindningar och granskningsdatum.</span></button>
+          <button class="choice-card" type="button" data-route="/tillgangar"><strong>7. Lägg till tillgångar</strong><br><span class="muted">Konton, sparande och investeringar.</span></button>
+          <button class="choice-card" type="button" data-route="/boendekalkyl"><strong>8. Skapa boendekalkyl</strong><br><span class="muted">Kalkyl mot riktiga kostnader.</span></button>
+          <button class="choice-card" type="button" data-route="/rapporter"><strong>9. Generera rapport</strong><br><span class="muted">Skapa första riktiga snapshoten.</span></button>
         </div>
       </article>
     </section>
@@ -3375,6 +3547,22 @@ async function handlePageClick(event) {
     return;
   }
 
+  const promoteIngestTarget = event.target.closest("[data-action='promote-ingest']");
+  if (promoteIngestTarget) {
+    await promoteIngestSuggestions();
+    return;
+  }
+
+  const clearIngestTarget = event.target.closest("[data-action='clear-ingest']");
+  if (clearIngestTarget) {
+    state.ui.ingestInput = "";
+    state.ui.ingestKind = "unknown";
+    state.ui.ingestSourceName = "";
+    state.ui.ingestResult = null;
+    render();
+    return;
+  }
+
   const resetTarget = event.target.closest("[data-reset-form]");
   if (resetTarget) {
     resetFormState(resetTarget.dataset.resetForm);
@@ -3391,6 +3579,12 @@ async function handlePageClick(event) {
 function handlePageInput(event) {
   if (event.target.name === "prompt") {
     state.ui.assistantInput = event.target.value;
+  } else if (event.target.name === "ingest_input_text") {
+    state.ui.ingestInput = event.target.value;
+  } else if (event.target.name === "ingest_input_kind") {
+    state.ui.ingestKind = event.target.value;
+  } else if (event.target.name === "ingest_source_name") {
+    state.ui.ingestSourceName = event.target.value;
   }
 }
 
@@ -3411,6 +3605,9 @@ async function handlePageSubmit(event) {
       case "loanForm":
         await saveLoan(form);
         break;
+      case "costForm":
+        await saveRecurringCost(form);
+        break;
       case "insuranceForm":
         await saveInsurance(form);
         break;
@@ -3428,6 +3625,9 @@ async function handlePageSubmit(event) {
         break;
       case "documentUploadForm":
         await uploadDocument(form);
+        break;
+      case "ingestAnalyzeForm":
+        await analyzeIngestForm(form);
         break;
       case "scenarioForm":
         await saveScenario(form);
@@ -3452,6 +3652,7 @@ function resetFormState(formId) {
     personForm: "person",
     incomeForm: "income",
     loanForm: "loan",
+    costForm: "cost",
     insuranceForm: "insurance",
     subscriptionForm: "subscription",
     vehicleForm: "vehicle",
@@ -3475,6 +3676,7 @@ async function deleteFromForm(formId) {
     personForm: async () => deleteRecord("person", API.persons, currentEdit("person")),
     incomeForm: async () => deleteRecord("income", API.incomes, currentEdit("income")),
     loanForm: async () => deleteRecord("loan", API.loans, currentEdit("loan")),
+    costForm: async () => deleteRecord("cost", API.recurringCosts, currentEdit("cost")),
     insuranceForm: async () => deleteRecord("insurance", API.insurancePolicies, currentEdit("insurance")),
     subscriptionForm: async () => deleteRecord("subscription", API.subscriptions, currentEdit("subscription")),
     vehicleForm: async () => deleteRecord("vehicle", API.vehicles, currentEdit("vehicle")),
@@ -3522,6 +3724,60 @@ async function generateReportSnapshot(form) {
   showToast("Rapporten genererades.");
 }
 
+async function analyzeIngestForm(form) {
+  if (!selectedHousehold()) throw new Error("Välj hushåll först.");
+  const inputText = form.elements.ingest_input_text.value.trim();
+  if (!inputText) throw new Error("Klistra in råtext innan du kör AI-analysen.");
+  state.ui.ingestPending = true;
+  state.ui.ingestResult = null;
+  render();
+  try {
+    const response = await request(`/households/${state.selectedHouseholdId}${API.ingestAnalyze}`, {
+      method: "POST",
+      body: JSON.stringify({
+        input_text: inputText,
+        input_kind: form.elements.ingest_input_kind.value,
+        source_name: form.elements.ingest_source_name.value.trim() || null,
+      }),
+    });
+    state.ui.ingestKind = form.elements.ingest_input_kind.value;
+    state.ui.ingestSourceName = form.elements.ingest_source_name.value.trim();
+    state.ui.ingestInput = inputText;
+    state.ui.ingestResult = response;
+    showToast("AI-analysen är klar. Granska förslagen innan du skapar reviewutkast.");
+  } finally {
+    state.ui.ingestPending = false;
+    render();
+  }
+}
+
+async function promoteIngestSuggestions() {
+  if (!selectedHousehold()) throw new Error("Välj hushåll först.");
+  if (!state.ui.ingestResult) throw new Error("Kör en AI-analys först.");
+  state.ui.ingestPromoting = true;
+  render();
+  try {
+    const response = await request(`/households/${state.selectedHouseholdId}${API.ingestPromote}`, {
+      method: "POST",
+      body: JSON.stringify({
+        input_text: state.ui.ingestInput,
+        input_kind: state.ui.ingestKind,
+        source_name: state.ui.ingestSourceName || null,
+        provider: state.ui.ingestResult.provider,
+        model: state.ui.ingestResult.model,
+        suggestions: state.ui.ingestResult.suggestions,
+      }),
+    });
+    await refreshAllData();
+    state.ui.ingestResult = null;
+    state.ui.ingestInput = "";
+    showToast(`Skapade ${response.created_drafts.length} reviewutkast.`);
+  } finally {
+    state.ui.ingestPromoting = false;
+    render();
+  }
+}
+
 async function askAssistant(form) {
   if (!selectedHousehold()) throw new Error("Välj hushåll först.");
   const prompt = form.elements.prompt.value.trim();
@@ -3529,14 +3785,23 @@ async function askAssistant(form) {
   state.ui.assistantMessages.push({ role: "user", content: prompt });
   state.ui.assistantPending = true;
   render();
-  const response = await request(`/households/${state.selectedHouseholdId}${API.assistant}`, {
-    method: "POST",
-    body: JSON.stringify({ prompt, conversation: state.ui.assistantMessages }),
-  });
-  state.ui.assistantMessages.push({ role: "assistant", content: response.answer });
-  state.ui.assistantInput = "";
-  state.ui.assistantPending = false;
-  render();
+  try {
+    const response = await request(`/households/${state.selectedHouseholdId}${API.assistant}`, {
+      method: "POST",
+      body: JSON.stringify({ prompt }),
+    });
+    state.ui.assistantMessages.push({
+      role: "assistant",
+      content: response.answer,
+      provider: response.provider,
+      model: response.model,
+      usage: response.usage,
+    });
+    state.ui.assistantInput = "";
+  } finally {
+    state.ui.assistantPending = false;
+    render();
+  }
 }
 
 function findItemByModuleAndId(moduleKey, id) {
@@ -3544,6 +3809,7 @@ function findItemByModuleAndId(moduleKey, id) {
     person: peopleForHousehold(),
     income: incomesForHousehold(),
     loan: loansForHousehold(),
+    cost: recurringCostsForHousehold(),
     insurance: insuranceForHousehold(),
     subscription: subscriptionsForHousehold(),
     vehicle: vehiclesForHousehold(),

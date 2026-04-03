@@ -10,6 +10,7 @@ Last reviewed: 2026-04-03.
 3. `docs/LOCKED_DECISIONS.md`
 4. `docs/ARCHITECTURE.md`
 5. `docs/NEXT_ACTION.md`
+6. `docs/AINEXTSTEPPATCH.md`
 
 ## Top-Level Directories
 
@@ -25,6 +26,7 @@ Last reviewed: 2026-04-03.
 - `app/models.py`: ORM schema
 - `app/schemas.py`: request/response schema
 - `app/calculations.py`: deterministic finance math
+- `app/ai_services.py`: OpenAI-backed analysis and ingest orchestration
 - `app/database.py`: engine/session/bootstrap
 - `app/settings.py`: environment-backed configuration
 
@@ -40,6 +42,8 @@ Last reviewed: 2026-04-03.
 - `alembic/versions/20260402_000001_baseline.py`: current baseline migration
 - `Dockerfile`: container runtime
 - `docker-compose.yml`: local Docker orchestration
+- `.env.example`: example runtime and OpenAI configuration
+- `scripts/start_app.sh`: preferred local start script
 - `requirements.txt`: Python dependencies
 
 ## Documentation Files
@@ -56,6 +60,7 @@ Canonical docs:
 - `docs/RUNTIME_AND_OPERATIONS.md`
 - `docs/KNOWN_GAPS_AND_RISKS.md`
 - `docs/NEXT_ACTION.md`
+- `docs/AINEXTSTEPPATCH.md`
 - `docs/REPO_MAP.md`
 - `docs/TERMS_AND_MODEL.md`
 
@@ -73,6 +78,7 @@ Supplemental and compatibility docs:
 ## Files to Read Carefully Before Making Changes
 
 - `app/main.py`
+- `app/ai_services.py`
 - `app/static/app.js`
 - `app/models.py`
 - `app/schemas.py`

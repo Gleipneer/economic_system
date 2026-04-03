@@ -15,4 +15,4 @@ Important correction:
 
 - `POST /demo/seed` is not part of the current runtime
 - Alembic already exists in the repo
-- the assistant is already a current feature, but it is deterministic and local-data-driven
+- the assistant is already a current feature and is OpenAI-backed when provider config exists

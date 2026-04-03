@@ -23,6 +23,7 @@ The active SPA currently exposes these page-level concepts:
 - persons
 - incomes
 - loans
+- recurring costs
 - subscriptions and contracts
 - insurance
 - vehicles
@@ -72,6 +73,7 @@ This should be preserved unless there is an explicit redesign decision.
 Highest-value modules in the current product shape:
 
 - overview
+- recurring costs
 - subscriptions and contracts
 - loans
 - housing calculation
@@ -83,11 +85,11 @@ These carry most of the product identity today.
 
 ## Frontend Reality That Must Not Be Missed
 
-- recurring costs still exist in the backend and in summary math
-- the active SPA route set does not currently expose recurring costs as a first-class screen
-- older V1 cost UI code still exists in `app/static/app.js`, but it is not part of the active routed product surface
+- recurring costs now exist in the backend, in summary math, and in the active routed SPA
+- the active recurring-cost screen uses the same calm product framing as the other household modules
+- older V1 UI code still exists in `app/static/app.js`, so future edits must be made against the active V2 block
 
-That means the frontend is currently incomplete, not that recurring costs disappeared from the system.
+That means the current frontend is more complete than the old docs described, but the file structure is still easy to edit incorrectly.
 
 ## How the Current Frontend Should Be Preserved
 
@@ -99,12 +101,14 @@ Preserve:
 - route-based page model
 - overview-first experience
 - assistant as a product feature, not a dev tool
+- Data-In AI inside the documents workflow, not as a detached generic chat
 
 Avoid:
 
 - collapsing back to generic tables everywhere
 - deleting the guided registration layer
 - removing reports, scenarios, or assistant from the primary UX
+- collapsing analysis AI and Data-In AI into one vague chatbot surface
 
 ## How the Assistant Fits In
 
@@ -121,3 +125,20 @@ It should not:
 - become a hidden write path
 - replace the structured forms
 - claim knowledge not present in the repo
+
+## How Data-In AI Fits In
+
+Data-In AI belongs in the raw-material intake flow.
+
+It should:
+
+- live near documents and pasted raw text
+- classify and structure underlag conservatively
+- show uncertainty
+- require explicit promote before any workflow row is created
+
+It should not:
+
+- pretend to be the same thing as the analysis assistant
+- write directly to canonical finance tables
+- make the app feel like a generic chat product

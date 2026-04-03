@@ -13,7 +13,8 @@ Today it combines:
 - a same-origin web frontend served from the backend
 - deterministic calculations for summaries, housing scenarios, reports, and scenario comparisons
 - document upload and draft/opportunity workflow objects
-- a lightweight assistant endpoint that summarizes existing household data
+- a read-only analysis AI surface over existing household data
+- a Data-In AI surface for raw text -> validated suggestions -> explicit draft promotion
 
 ## What Problem It Solves
 
@@ -72,14 +73,17 @@ The current frontend is not a pure CRUD admin panel, but it is also not yet a fi
 - document upload/download is real
 - extraction drafts and optimization opportunities exist as workflow objects
 - report snapshots and scenarios are real
-- the assistant endpoint is real, but deterministic and local-data-driven
+- recurring costs are reachable in the active frontend
+- analysis AI and Data-In AI are real when provider env is configured
+- AI stays outside canonical writes unless a later explicit draft apply happens
 
 ### Future Vision
 
 Likely direction, but not implemented as a committed runtime fact:
 
+- stronger LF-style bank copy-paste ingest
 - stronger AI-assisted document understanding
-- better assistant behavior
+- richer assistant behavior
 - safer approval workflows around AI outputs
 - stronger operational hardening
 - richer frontend flows
@@ -94,8 +98,8 @@ The repo does not currently implement:
 - a finance core ledger
 - authentication or authorization
 - background jobs
-- external AI provider integration
 - object storage
+- autonomous AI writes into canonical tables
 
 ## Source-of-Truth Rule
 

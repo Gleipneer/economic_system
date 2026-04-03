@@ -28,7 +28,9 @@ This file captures decisions that the current repo shape depends on. They are no
 
 - Canonical household data must not be silently overwritten by AI behavior.
 - Any future AI write path must remain explicit and reviewable.
-- The current assistant must remain read-only relative to canonical finance tables.
+- The analysis assistant must remain read-only relative to canonical finance tables.
+- Data-In AI and analysis AI are separate product surfaces and must not silently collapse into one generic chat.
+- Missing AI provider configuration must fail openly rather than producing fake local fallback answers.
 - Future AI extraction should continue to land in workflow objects such as drafts or opportunities before promotion.
 - Deterministic calculations remain the source of truth for money math even if AI is added later.
 
@@ -41,7 +43,7 @@ This file captures decisions that the current repo shape depends on. They are no
 ## Explicit "Do Not Let This Drift"
 
 - Do not claim `POST /demo/seed` exists unless it is implemented again.
-- Do not describe the current assistant as external-model-backed AI.
+- Do not describe the current AI features as autonomous data writers.
 - Do not describe the current system as transaction ingest or finance core.
 - Do not reframe the current frontend as a generic CRUD dashboard.
 - Do not reimplement core summary or housing calculations in the frontend.

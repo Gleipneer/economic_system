@@ -13,6 +13,9 @@ def load_app(tmp_path):
     db_path = tmp_path / "test.db"
     os.environ["DATABASE_URL"] = f"sqlite:///{db_path}"
     os.environ["UPLOAD_DIR"] = str(tmp_path / "uploads")
+    os.environ["OPENAI_API_KEY"] = ""
+    os.environ["OPENAI_ANALYSIS_MODEL"] = ""
+    os.environ["OPENAI_INGEST_MODEL"] = ""
 
     import app.database as database
     import app.models as models
@@ -249,7 +252,7 @@ def test_healthz_and_home(tmp_path):
         assert client.get("/healthz").json() == {"status": "ok"}
         response = client.get("/")
         assert response.status_code == 200
-        assert "Hushållsekonomi" in response.text
+        assert "Ekonomi" in response.text
 
 
 def test_alembic_upgrade_head_creates_schema(tmp_path):
@@ -385,3 +388,24 @@ def test_calculation_helpers_cover_frequency_and_estimated_loan_payment(tmp_path
                 "required_monthly_payment": None,
             }
         ) == pytest.approx(1060)
+
+
+def test_ai_routes_fail_cleanly_without_provider(tmp_path):
+    app = load_app(tmp_path)
+    with TestClient(app) as client:
+        ids = create_household_fixture(client)
+        household_id = ids["household_id"]
+
+        analysis = client.post(
+            f"/households/{household_id}/assistant/respond",
+            json={"prompt": "Hur ser vår ekonomi ut just nu?"},
+        )
+        assert analysis.status_code == 503
+        assert "OPENAI_API_KEY" in analysis.json()["detail"]
+
+        ingest = client.post(
+            f"/households/{household_id}/ingest_ai/analyze",
+            json={"input_text": "2026-04-01 GYM AB -299,00", "input_kind": "bank_copy_paste"},
+        )
+        assert ingest.status_code == 503
+        assert "OPENAI_API_KEY" in ingest.json()["detail"]

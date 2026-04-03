@@ -203,7 +203,9 @@ Additional document routes:
 * `GET /housing_scenarios/:id/evaluate` – Evaluate a housing scenario
 * `POST /scenarios/:id/run` – Execute a scenario and persist a scenario result
 * `POST /extraction_drafts/:id/apply` – Apply an approved draft into canonical tables
-* `POST /households/:id/assistant/respond` – Return a household-aware assistant answer
+* `POST /households/:id/assistant/respond` – Return a household-aware assistant answer plus provider/model metadata
+* `POST /households/:id/ingest_ai/analyze` – Analyse raw text and return validated structured suggestions
+* `POST /households/:id/ingest_ai/promote` – Promote reviewed suggestions into workflow artifacts only
 
 Important current truth:
 
