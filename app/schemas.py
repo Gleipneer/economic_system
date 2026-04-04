@@ -692,6 +692,12 @@ class ReportSnapshotRead(ReportSnapshotBase):
         orm_mode = True
 
 
+class RiskSignalRead(BaseModel):
+    key: str
+    severity: Literal["info", "warning", "critical"]
+    message_sv: str
+
+
 class HouseholdSummaryRead(BaseModel):
     household_id: int
     monthly_income: float
@@ -713,6 +719,7 @@ class HouseholdSummaryRead(BaseModel):
     net_worth_estimate: float
     gross_income_only_entries: int
     counts: Dict[str, int]
+    risk_signals: List[RiskSignalRead] = Field(default_factory=list)
 
 
 class HousingScenarioEvaluationRead(BaseModel):
@@ -799,6 +806,9 @@ class IngestSuggestionRead(BaseModel):
     validation_status: Literal["valid", "invalid"] = "valid"
     validation_errors: List[str] = Field(default_factory=list)
     uncertainty_notes: List[str] = Field(default_factory=list)
+    duplicate_indicator: Optional[str] = None
+    ownership_candidate: Optional[Literal["private", "shared", "unclear"]] = None
+    why_suggested: Optional[str] = None
 
 
 class IngestImageReadinessRead(BaseModel):

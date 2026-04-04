@@ -2523,6 +2523,23 @@ function renderOverviewPageV2() {
         ${renderStatCard("Nettoförmögenhet", money(summary.net_worth_estimate), `${money(summary.asset_market_value)} tillgångar minus ${money(summary.loan_balance_total)} lån`)}
       </section>
 
+      ${(summary.risk_signals?.length) ? `
+      <article class="panel">
+        <span class="section-eyebrow">Risksignaler och insikter</span>
+        <div class="record-grid">
+          ${summary.risk_signals.map((sig) => `
+            <article class="record-card">
+              <div class="record-title-row">
+                <div>
+                  <span class="badge ${sig.severity === "critical" ? "danger" : sig.severity === "warning" ? "warning" : "info"}">${sig.severity === "critical" ? "Kritisk" : sig.severity === "warning" ? "Varning" : "Info"}</span>
+                  <p>${escapeHtml(sig.message_sv)}</p>
+                </div>
+              </div>
+            </article>
+          `).join("")}
+        </div>
+      </article>` : ""}
+
       <section class="hero-grid">
         <article class="panel">
           <span class="section-eyebrow">Vad bör ni göra nu?</span>
@@ -3342,7 +3359,9 @@ function renderIngestSuggestionCard(item) {
         ${fields.cadence || item.cadence ? detailCell("Frekvens", fields.cadence || item.cadence) : ""}
         ${fields.household_relevance || item.household_relevance ? detailCell("Hushållsrelevans", fields.household_relevance || item.household_relevance) : ""}
       </div>
-      <p class="muted">${escapeHtml(item.rationale || item.summary || "Ingen rationale angiven.")}</p>
+      ${item.why_suggested ? `<p class="muted">💡 ${escapeHtml(item.why_suggested)}</p>` : `<p class="muted">${escapeHtml(item.rationale || "Ingen rationale angiven.")}</p>`}
+      ${item.ownership_candidate ? `<span class="badge ${item.ownership_candidate === "shared" ? "info" : item.ownership_candidate === "private" ? "muted" : "warning"}">${item.ownership_candidate === "shared" ? "Gemensam" : item.ownership_candidate === "private" ? "Privat" : "Oklar ägare"}</span>` : ""}
+      ${item.duplicate_indicator ? `<p class="muted" style="color:var(--clr-warning,#eab308)">⚠ ${escapeHtml(item.duplicate_indicator)}</p>` : ""}
       ${uncertainty?.length ? `<p class="muted">Osäkerhet: ${escapeHtml(uncertainty.join(" · "))}</p>` : ""}
       ${item.validation_errors?.length ? `<p class="muted">Validering: ${escapeHtml(item.validation_errors.join(" · "))}</p>` : ""}
       <details class="raw-json">

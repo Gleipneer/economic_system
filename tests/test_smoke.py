@@ -912,3 +912,73 @@ def test_bank_pdf_export_generates_valid_pdf(tmp_path):
         assert response.headers["content-type"] == "application/pdf"
         assert b"%PDF" in response.content[:10]
         assert len(response.content) > 1000
+
+
+def test_summary_includes_risk_signals(tmp_path):
+    app = load_app(tmp_path)
+    with TestClient(app) as client:
+        household = client.post("/households", json={"name": "Risk Test", "currency": "SEK", "primary_country": "SE"})
+        household_id = household.json()["id"]
+
+        summary = client.get(f"/households/{household_id}/summary")
+        assert summary.status_code == 200
+        payload = summary.json()
+        assert "risk_signals" in payload
+        assert any(sig["key"] == "no_income" for sig in payload["risk_signals"])
+
+
+def test_ingest_suggestion_has_intelligence_fields(tmp_path, monkeypatch):
+    app = load_app(tmp_path)
+    from app import ai_services, schemas
+
+    app_response = ai_services.IngestStructuredOutput(
+        classification=ai_services.IngestDocumentClassificationOutput(
+            document_type="subscription_contract",
+            provider_name="Netflix",
+            label="Netflix Standard",
+            amount=149.0,
+            currency="SEK",
+            due_date=None,
+            cadence="monthly",
+            category_hint="streaming",
+            suggested_target_entity_type="subscription_contract",
+            household_relevance="high",
+            confidence=0.95,
+            confirmed_fields=["provider_name", "amount"],
+            notes=[],
+            uncertainty_reasons=[],
+        ),
+        summary="Netflix-abonnemang.",
+        guidance=[],
+        suggestions=[
+            ai_services.IngestStructuredSuggestion(
+                target_entity_type="subscription_contract",
+                review_bucket="subscription_contract",
+                title="Netflix",
+                rationale="Tydligt streaming-abonnemang.",
+                confidence=0.92,
+                proposed_json='{"household_id":1,"category":"streaming","provider":"Netflix","current_monthly_cost":149,"billing_frequency":"monthly"}',
+                uncertainty_notes=[],
+            ),
+        ],
+    )
+
+    def fake_call(*_a, **_kw):
+        return app_response, "gpt-test", schemas.AIUsageRead(input_tokens=100, output_tokens=50, total_tokens=150)
+
+    monkeypatch.setattr(ai_services, "_call_openai_structured", fake_call)
+
+    with TestClient(app) as client:
+        ids = create_household_fixture(client)
+        household_id = ids["household_id"]
+
+        response = client.post(
+            f"/households/{household_id}/ingest_ai/analyze",
+            json={"input_text": "Netflix 149 kr/mån", "source_channel": "text"},
+        )
+        assert response.status_code == 200
+        suggestion = response.json()["suggestions"][0]
+        assert "ownership_candidate" in suggestion
+        assert suggestion["ownership_candidate"] == "private"
+        assert "why_suggested" in suggestion
+        assert len(suggestion["why_suggested"]) > 0
