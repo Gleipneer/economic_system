@@ -800,7 +800,7 @@ class IngestInputRead(BaseModel):
 
 
 class IngestDocumentSummaryRead(BaseModel):
-    document_type: Literal["subscription_contract", "invoice", "recurring_cost_candidate", "transfer_or_saving_candidate", "bank_row_batch", "financial_note", "unclear"]
+    document_type: Literal["subscription_contract", "invoice", "recurring_cost_candidate", "transfer_or_saving_candidate", "bank_row_batch", "insurance_policy", "loan_or_credit", "financial_note", "unclear"]
     provider_name: Optional[str] = None
     label: Optional[str] = None
     amount: Optional[float] = None

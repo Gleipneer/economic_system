@@ -3053,6 +3053,8 @@ function classificationLabel(docType) {
     recurring_cost_candidate: "Återkommande kostnad",
     transfer_or_saving_candidate: "Överföring / sparande",
     bank_row_batch: "Bankrader / kontoutdrag",
+    insurance_policy: "Försäkring",
+    loan_or_credit: "Lån / kredit",
     financial_note: "Finansiell anteckning",
     unclear: "Oklart underlag",
   }[docType] || docType || "Oklart";
@@ -3065,6 +3067,8 @@ function classificationBadgeTone(docType) {
     recurring_cost_candidate: "info",
     transfer_or_saving_candidate: "info",
     bank_row_batch: "info",
+    insurance_policy: "info",
+    loan_or_credit: "info",
     financial_note: "muted",
     unclear: "warning",
   }[docType] || "muted";
@@ -3192,24 +3196,24 @@ function renderIngestPipelineStrip() {
   return `
     <section class="record-grid four workflow-pipeline">
       <article class="workflow-step-card">
-        <span class="badge info">1. Rå input</span>
-        <h4>Klistra in text eller ladda upp underlag</h4>
-        <p class="muted">Text, PDF-text eller uppladdade dokument ska kunna bli ingång till samma reviewflöde.</p>
+        <span class="badge info">1. Input</span>
+        <h4>Text, PDF, bild, bank-paste</h4>
+        <p class="muted">Klistra text, ladda upp PDF/bild (OCR), eller klistra bankrader från LF-format.</p>
       </article>
       <article class="workflow-step-card">
         <span class="badge info">2. Extraktion</span>
-        <h4>Text normaliseras innan AI</h4>
-        <p class="muted">När text går att extrahera ska den synas som workflow-data, inte som kanonisk sanning.</p>
+        <h4>Text/OCR → normalisering</h4>
+        <p class="muted">PDF-text, Tesseract OCR eller ren text normaliseras. OCR-text kan ha felläsningar.</p>
       </article>
       <article class="workflow-step-card">
-        <span class="badge info">3. AI-review</span>
-        <h4>Klassificera och markera osäkerhet</h4>
-        <p class="muted">Modellen ska visa vad som är säkert, vad som är tveksamt och vart underlaget pekar.</p>
+        <span class="badge info">3. AI-klassificering</span>
+        <h4>Typ, fakta, osäkerhet</h4>
+        <p class="muted">AI klassificerar underlag och extraherar kärnfakta. Osäkerhet markeras tydligt.</p>
       </article>
       <article class="workflow-step-card">
-        <span class="badge info">4. Promote</span>
-        <h4>Skapa reviewutkast explicit</h4>
-        <p class="muted">Promote är ett separat steg. Det får inte skriva tyst till hushållets kanoniska data.</p>
+        <span class="badge info">4. Review → Apply</span>
+        <h4>Granska → Godkänn</h4>
+        <p class="muted">Promote skapar reviewutkast. Apply skriver till kanonisk data separat och explicit.</p>
       </article>
     </section>
   `;
@@ -3500,25 +3504,58 @@ function renderDocumentsPageV2() {
           <h3>${drafts.length ? `${drafts.length} utkast att granska` : "Inga utkast att granska"}</h3>
           <p class="muted">Det här är inte kanoniska hushållsposter. Det är reviewobjekt som fortfarande kräver explicit apply senare.</p>
           <div class="record-grid">
-            ${drafts.map((draft) => `
-              <article class="record-card">
-                <div class="record-title-row">
-                  <div>
-                    <h4 class="record-title">${escapeHtml(draft.target_entity_type)}</h4>
-                    <p class="muted">Dokument ${draft.document_id} · status ${escapeHtml(draft.status)}</p>
-                  </div>
-                  <div class="actions-row">
-                    <button class="primary compact" type="button" data-apply-draft="${draft.id}">Applicera</button>
-                    <button class="danger compact" type="button" data-delete-draft="${draft.id}">Avvisa</button>
-                  </div>
-                </div>
-                <pre>${escapeHtml(JSON.stringify(draft.proposed_json, null, 2))}</pre>
-              </article>
-            `).join("") || `<div class="empty-state"><p>Det finns inga väntande reviewutkast.</p></div>`}
+            ${drafts.map((draft) => renderDraftCard(draft)).join("") || `<div class="empty-state"><p>Det finns inga väntande reviewutkast.</p></div>`}
           </div>
         </article>
       </section>
     </section>
+  `;
+}
+
+function draftTargetLabel(targetType) {
+  return {
+    recurring_cost: "Återkommande kostnad",
+    subscription_contract: "Abonnemang",
+    loan: "Lån",
+    income_source: "Inkomstkälla",
+  }[targetType] || targetType;
+}
+
+function draftStatusBadge(status) {
+  return {
+    pending_review: `<span class="badge warning">Väntar på granskning</span>`,
+    approved: `<span class="badge success">Godkänd</span>`,
+    rejected: `<span class="badge muted">Avvisad</span>`,
+  }[status] || `<span class="badge muted">${escapeHtml(status)}</span>`;
+}
+
+function renderDraftCard(draft) {
+  const proposed = draft.proposed_json || {};
+  const title = proposed.provider || proposed.vendor || proposed.lender || proposed.source || draftTargetLabel(draft.target_entity_type);
+  const amount = proposed.amount || proposed.current_monthly_cost || proposed.net_amount || proposed.required_monthly_payment;
+  const freq = proposed.frequency || proposed.billing_frequency;
+  return `
+    <article class="record-card">
+      <div class="record-title-row">
+        <div>
+          <span class="badge ${classificationBadgeTone(draft.target_entity_type)}">${escapeHtml(draftTargetLabel(draft.target_entity_type))}</span>
+          <h4 class="record-title">${escapeHtml(title)}</h4>
+          <p class="muted">Dokument #${draft.document_id}${draft.confidence != null ? ` · confidence ${Math.round(draft.confidence * 100)}%` : ""}</p>
+        </div>
+        <div>
+          ${draftStatusBadge(draft.status)}
+        </div>
+      </div>
+      ${amount != null ? `<div class="detail-grid three fact-grid">${detailCell("Belopp", formatIngestAmount(amount, proposed.currency))}${freq ? detailCell("Frekvens", freq) : ""}${proposed.category ? detailCell("Kategori", proposed.category) : ""}</div>` : ""}
+      <div class="actions-row">
+        <button class="primary compact" type="button" data-apply-draft="${draft.id}">Applicera till kanonisk data</button>
+        <button class="danger compact" type="button" data-delete-draft="${draft.id}">Avvisa</button>
+      </div>
+      <details class="raw-json">
+        <summary>Visa rå JSON</summary>
+        <pre>${escapeHtml(JSON.stringify(proposed, null, 2))}</pre>
+      </details>
+    </article>
   `;
 }
 

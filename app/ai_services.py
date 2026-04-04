@@ -42,7 +42,7 @@ class AnalysisStructuredOutput(StrictModel):
 
 
 class IngestDocumentClassificationOutput(StrictModel):
-    document_type: Literal["subscription_contract", "invoice", "recurring_cost_candidate", "transfer_or_saving_candidate", "bank_row_batch", "financial_note", "unclear"]
+    document_type: Literal["subscription_contract", "invoice", "recurring_cost_candidate", "transfer_or_saving_candidate", "bank_row_batch", "insurance_policy", "loan_or_credit", "financial_note", "unclear"]
     provider_name: str | None
     label: str | None
     amount: float | None
@@ -343,19 +343,17 @@ def _legacy_document_type_for_input(input_kind: str | None) -> str:
 
 
 def _document_type_from_classification(document_type: str, source_channel: str) -> str:
-    if document_type == "subscription_contract":
-        return "contract"
-    if document_type == "invoice":
-        return "invoice"
-    if document_type == "bank_row_batch":
-        return "bank_statement"
-    if document_type == "transfer_or_saving_candidate":
-        return "receipt"
-    if document_type == "recurring_cost_candidate":
-        return "receipt"
-    if document_type == "financial_note":
-        return "receipt"
-    return "receipt"
+    mapping = {
+        "subscription_contract": "contract",
+        "invoice": "invoice",
+        "bank_row_batch": "bank_statement",
+        "insurance_policy": "contract",
+        "loan_or_credit": "contract",
+        "transfer_or_saving_candidate": "receipt",
+        "recurring_cost_candidate": "receipt",
+        "financial_note": "receipt",
+    }
+    return mapping.get(document_type, "receipt")
 
 
 def _review_bucket_for_suggestion(
@@ -621,6 +619,8 @@ def _ingest_field_guides(records: dict[str, list[dict[str, Any]]]) -> dict[str, 
             "recurring_cost_candidate",
             "transfer_or_saving_candidate",
             "bank_row_batch",
+            "insurance_policy",
+            "loan_or_credit",
             "financial_note",
             "unclear",
         ],
