@@ -112,7 +112,7 @@ underlag
 - [x] MerchantAlias-modell (alias → canonical_name, category_hint)
 - [x] API: list/create/delete per hushåll
 - [x] Normalisering appliceras på ingest-text innan AI-analys
-- [ ] Frontend: hantera aliases i UI (lista, skapa, ta bort)
+- [x] Frontend: hantera aliases i UI (lista, skapa, ta bort) på Documents-sidan
 
 ### 2.2 Dubblettkontroll
 - [ ] Detektera om samma faktura kom in via PDF och screenshot
