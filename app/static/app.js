@@ -2221,6 +2221,7 @@ Object.assign(state.data, {
   scenarios: [],
   scenarioResults: [],
   reports: [],
+  merchantAliases: [],
 });
 
 state.ui = {
@@ -2351,6 +2352,13 @@ async function refreshAllData() {
     persistSelection();
   }
   await ensureSummaryLoaded();
+  if (state.selectedHouseholdId) {
+    try {
+      state.data.merchantAliases = await request(`/households/${state.selectedHouseholdId}/merchant_aliases`);
+    } catch (_err) {
+      state.data.merchantAliases = [];
+    }
+  }
 }
 
 function render() {
@@ -3510,6 +3518,34 @@ function renderDocumentsPageV2() {
           </div>
         </article>
       </section>
+      <article class="panel">
+        <span class="section-eyebrow">Leverantörsnormalisering</span>
+        <h3>Kända leverantörsnamn</h3>
+        <p class="muted">Lägg till alias → kanoniskt namn. Dessa tillämpas automatiskt på ingest-text innan AI-analys.</p>
+        <div class="record-grid">
+          ${(state.data.merchantAliases || []).map((a) => `
+            <article class="record-card">
+              <div class="record-title-row">
+                <div>
+                  <h4 class="record-title">${escapeHtml(a.alias)} → ${escapeHtml(a.canonical_name)}</h4>
+                  <p class="muted">${a.category_hint ? escapeHtml(a.category_hint) : "Ingen kategori"}</p>
+                </div>
+                <button class="danger compact" type="button" data-action="delete-alias" data-alias-id="${a.id}">Ta bort</button>
+              </div>
+            </article>
+          `).join("") || `<div class="empty-state compact"><p>Inga alias registrerade. Lägg till för att förbättra ingest.</p></div>`}
+        </div>
+        <form id="merchantAliasForm" class="form-grid" style="margin-top:var(--space-m)">
+          ${renderField({ key: "alias_name", label: "Alias (t.ex. NETFLIX.COM)", type: "text", required: true }, "")}
+          ${renderField({ key: "canonical_name", label: "Kanoniskt namn (t.ex. Netflix)", type: "text", required: true }, "")}
+          ${renderField({ key: "category_hint", label: "Kategori (valfritt)", type: "text" }, "")}
+          <div class="field full">
+            <div class="form-actions">
+              <button class="primary" type="submit" ${selectedHousehold() ? "" : "disabled"}>Lägg till alias</button>
+            </div>
+          </div>
+        </form>
+      </article>
     </section>
   `;
 }
@@ -3974,6 +4010,16 @@ async function handlePageClick(event) {
     return;
   }
 
+  const deleteAliasTarget = event.target.closest("[data-action='delete-alias']");
+  if (deleteAliasTarget) {
+    const aliasId = Number(deleteAliasTarget.dataset.aliasId);
+    await request(`/households/${state.selectedHouseholdId}/merchant_aliases/${aliasId}`, { method: "DELETE" });
+    await refreshAllData();
+    render();
+    showToast("Alias borttaget.");
+    return;
+  }
+
   const runScenarioTarget = event.target.closest("[data-run-scenario]");
   if (runScenarioTarget) {
     await request(`/scenarios/${Number(runScenarioTarget.dataset.runScenario)}/run`, { method: "POST" });
@@ -4124,6 +4170,9 @@ async function handlePageSubmit(event) {
         break;
       case "ingestAnalyzeForm":
         await analyzeIngestForm(form);
+        break;
+      case "merchantAliasForm":
+        await saveMerchantAlias(form);
         break;
       case "scenarioForm":
         await saveScenario(form);
@@ -4313,6 +4362,22 @@ async function promoteIngestSuggestions() {
     state.ui.ingestPromoting = false;
     render();
   }
+}
+
+async function saveMerchantAlias(form) {
+  if (!selectedHousehold()) throw new Error("Välj hushåll först.");
+  const alias = form.elements.alias_name.value.trim();
+  const canonical = form.elements.canonical_name.value.trim();
+  const hint = form.elements.category_hint.value.trim() || null;
+  if (!alias || !canonical) throw new Error("Fyll i alias och kanoniskt namn.");
+  await request(`/households/${state.selectedHouseholdId}/merchant_aliases`, {
+    method: "POST",
+    body: JSON.stringify({ household_id: state.selectedHouseholdId, alias, canonical_name: canonical, category_hint: hint }),
+  });
+  form.reset();
+  await refreshAllData();
+  render();
+  showToast("Alias tillagt.");
 }
 
 async function askAssistant(form) {
