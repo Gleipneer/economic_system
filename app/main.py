@@ -29,11 +29,11 @@ from typing import List
 
 from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 
-from . import ai_services, calculations, database, models, schemas
+from . import ai_services, calculations, database, models, pdf_export, schemas
 from .ingest_content import extract_text_from_upload, normalize_ingest_text
 from .settings import get_settings
 
@@ -242,6 +242,19 @@ def generate_household_report_snapshot(
     db.commit()
     db.refresh(snapshot)
     return snapshot
+
+
+@app.get("/households/{household_id}/export/bank_pdf")
+def export_bank_pdf(household_id: int, db: Session = Depends(get_db)):
+    ensure_household_exists(db, household_id)
+    pdf_bytes = pdf_export.generate_bank_pdf(db, household_id)
+    household = db.get(models.Household, household_id)
+    filename = f"bankkalkyl-{household.name.lower().replace(' ', '-')}-{date.today().isoformat()}.pdf"
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @app.post("/households/{household_id}/optimization_scan", response_model=List[schemas.OptimizationOpportunityRead])

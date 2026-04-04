@@ -899,3 +899,16 @@ def test_ingest_analyze_bank_paste_with_mock(tmp_path, monkeypatch):
         assert payload["source_channel"] == "bank_paste"
         assert len(payload["suggestions"]) == 1
         assert payload["suggestions"][0]["review_bucket"] == "recurring_cost"
+
+
+def test_bank_pdf_export_generates_valid_pdf(tmp_path):
+    app = load_app(tmp_path)
+    with TestClient(app) as client:
+        ids = create_household_fixture(client)
+        household_id = ids["household_id"]
+
+        response = client.get(f"/households/{household_id}/export/bank_pdf")
+        assert response.status_code == 200
+        assert response.headers["content-type"] == "application/pdf"
+        assert b"%PDF" in response.content[:10]
+        assert len(response.content) > 1000

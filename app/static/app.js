@@ -3673,6 +3673,15 @@ function renderReportsPageV2() {
   return `
     <section class="page-wrap">
       ${renderPageHeader("Sparade rapporter", "Genererade rapporter och sammanfattningar")}
+      <article class="panel form-card">
+        <span class="section-eyebrow">Bankkalkyl (PDF)</span>
+        <h3>Exportera hushållskalkyl för banken</h3>
+        <p class="muted">Genererar en professionell PDF med hushållets ekonomi. Lämplig att visa vid bostadslånsansökan.</p>
+        <div class="form-actions">
+          <a class="primary" href="/households/${state.selectedHouseholdId}/export/bank_pdf" target="_blank" ${selectedHousehold() ? "" : "disabled"}>Ladda ned bankkalkyl (PDF)</a>
+        </div>
+        <p class="muted" style="margin-top:var(--space-s)">PDF:en bygger på hushållets registrerade data. Eventuella reviewutkast ingår inte i beräkningarna.</p>
+      </article>
       <section class="split-layout">
         <article class="panel form-card">
           <span class="section-eyebrow">Generera rapport</span>
