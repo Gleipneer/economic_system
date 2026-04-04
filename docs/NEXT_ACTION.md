@@ -1,22 +1,21 @@
 # Next Action
 
 Canonical status: single recommended next task for the next agent pass.
-Last reviewed: 2026-04-04.
+Last reviewed: 2026-04-04 (post-sanitization and verified main parity).
 
 ## Next Task
 
-Improve review UX for batched bank paste results and OCR-extracted documents.
+Stabilize intelligence layer V1 quality by adding provenance and stricter duplicate matching against canonical tables.
 
 ## Why This Comes Next
 
-This is the highest-value gap directly visible after the current pass:
+The branch/main sanitization pass is now complete (merge done, migration added, tests and runtime checks green), so the highest-value remaining risk is data traceability and duplicate precision in intelligence outputs:
 
-- the app now has a real OpenAI-backed Data-In surface
-- the next practical user problem is pasted bank data, especially LF-style account export text
-- current ingest is conservative and safe, but it is strongest on simple contract text rather than bank-row interpretation
-- there is still no transaction ledger, so the next step must stay inside the existing planning/workflow model
+- duplicate indicator currently checks drafts and should also compare canonical subscriptions/costs
+- review suggestions need explicit provenance links (document -> draft -> applied entity)
+- ownership and why-engine are already useful, but evidence chain is still implicit
 
-That makes bank-copy-paste-to-review-draft the next product and AI step with the best user value per unit of risk.
+This keeps momentum on correctness without opening any new major feature track.
 
 ## What Must Stay Stable
 
@@ -37,12 +36,14 @@ That makes bank-copy-paste-to-review-draft the next product and AI step with the
 
 ## Acceptance Criteria
 
-- LF-like pasted account text with fields such as `bokföringsdatum`, `transaktionsdatum`, `transaktionstext`, `belopp`, and `saldo` can be analysed in the product.
-- The system can classify rows conservatively into likely recurring payment, likely subscription, likely transfer/saving, or unclear.
-- Suggestions are validated and presented as reviewable workflow artifacts, not as silent canonical writes.
-- The UI keeps raw input, AI interpretation, and later canonical application clearly separated.
-- Existing assistant, recurring-cost, subscription, document, and report flows remain stable.
-- Documentation is updated to reflect the real scope of the new ingest behavior.
+- every applied draft can be traced deterministically to source document + draft payload
+- duplicate indicator checks both pending/deferred drafts and canonical rows
+- no silent writes to canonical tables from analyze/promote endpoints
+- existing full verification remains green:
+  - `alembic upgrade head`
+  - `python -m pytest tests/ -v`
+  - app startup + `/`, `/docs`, `/healthz`
+- docs updated with verified behavior and constraints
 
 ## Useful Starting Files
 

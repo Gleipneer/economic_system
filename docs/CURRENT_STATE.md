@@ -1,7 +1,7 @@
 # Current State
 
 Canonical status: strict description of what exists in the code now.
-Last reviewed against code: 2026-04-03.
+Last reviewed against code: 2026-04-04.
 
 ## Runtime Shape
 
@@ -134,7 +134,7 @@ Current storage model:
 
 - relational database via SQLAlchemy
 - SQLite by default through `DATABASE_URL=sqlite:///./database.db`
-- Alembic baseline migration exists
+- Alembic baseline migration exists + merchant alias follow-up migration
 - local filesystem storage for uploaded documents under `UPLOAD_DIR`, default `./uploaded_files`
 - direct OpenAI integration through `app/ai_services.py` when `OPENAI_API_KEY` is set
 
@@ -152,18 +152,21 @@ Verified directly in code:
 - document upload writes files to disk and stores metadata
 - summary, scenario, housing, report, optimization, recurring-cost, ingest, and assistant flows are implemented in code
 
-Verified in local runtime on 2026-04-03:
+Verified in local runtime on 2026-04-04:
 
 - `alembic upgrade head`
-- `/`, `/docs`, and `/healthz`
-- `./venv/bin/python -m pytest -q tests/test_smoke.py` -> `6 passed`
+- `python -m pytest tests/ -v` -> `24 passed`
+- `/`, `/docs`, and `/healthz` via browser and HTTP checks
 - recurring-cost create/edit/delete in the browser
 - document upload and download in the browser
 - Data-In AI analyze and promote in the browser
 - assistant analysis in the browser with live OpenAI responses
 - subscription form submit in the browser; the previously reported `502` in that flow was not reproduced locally
-- `./scripts/start_app.sh` port fallback from `8000` to `8001`
-- Tailscale URL output from `./scripts/start_app.sh`
+- Runtime intelligence-layer checks validated in-process:
+  - merchant alias normalization before AI call
+  - duplicate indicator on ingest suggestions
+  - ownership candidate and why-engine fields on suggestions
+  - risk signals present on household summary
 
 Live OpenAI verification on 2026-04-03 used:
 
