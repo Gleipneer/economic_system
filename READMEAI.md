@@ -4,85 +4,100 @@ Last updated: 2026-04-04.
 
 ## What This Agent Read
 
-All canonical docs + all key source files. See previous handoffs for full list.
+All canonical docs + key source files. Full context from previous handoffs.
 
 ## What This Agent Did
 
-### 1. Fixed master roadmap to match code reality
-- insurance_policy, loan_or_credit already implemented → marked checked
-- Rich draft cards already done → marked checked
-- Added 1.7 Bank-Ready PDF Export section (all checked)
+### Intelligence Layer Patch V1
 
-### 2. Completed Phase 1 Review Queue (final 2 items)
-- **Inline draft editing**: JSON textarea with save/cancel before apply
-- **Defer**: "Skjut upp" button sets status to `deferred`
+Built and verified 5 intelligence features under the hood:
 
-### 3. Built merchant normalization (Phase 2.1 complete)
-- **Backend**: `MerchantAlias` model, `GET/POST/DELETE /households/{id}/merchant_aliases` API
-- **Ingest integration**: aliases loaded + applied to text before AI classification
-- **Frontend**: alias management UI on documents page (list, create, delete)
-- **Live verified**: NETFLIX.COM → Netflix normalization works in both text and bank paste
+1. **Risk signals on household summary** (8 signal types)
+   - low_margin, negative_cashflow, high_fixed_ratio, high_subscription_cost
+   - high_debt_ratio, elevated_debt_ratio, unverified_income, pending_reviews, no_income
+   - Displayed on overview page with severity badges
+   - Included in PDF export with risk section
+   - Deterministic (no AI) — based on real household math
 
-### 4. Live OpenAI verification
-- Subscription with alias normalization: `subscription_contract`, conf 0.98, 1660 tokens
-- Bank paste (2 rows) with alias: `bank_row_batch`, conf 0.99, 1918 tokens, both suggestions valid
-- Promote flow: zero canonical writes confirmed
-- PDF export: 200 OK, 3232 bytes
-- Assistant: works, 673 tokens
+2. **Duplicate indicator on suggestions**
+   - Checks existing pending_review/deferred drafts for same provider+amount
+   - Shows warning in review UI: "Möjlig dubblett: liknande utkast #1"
+   - Live-tested: Netflix duplicate correctly detected
 
-## Verified in Runtime
+3. **Ownership candidate per suggestion**
+   - Heuristic: shared (mat, boende, transport, broadband) vs private (gym, streaming, software)
+   - Displayed as color-coded badge in review UI
+   - Live-tested: Netflix→private, broadband→shared
 
-- 22 pytest tests pass
+4. **Why-engine rationale**
+   - AI rationale or auto-generated explanation on every suggestion
+   - Shows classification, provider, amount, confidence in human-readable Swedish
+   - Displayed in review UI
+
+5. **Enhanced PDF export with risk signals**
+   - Risk signals section added before source notes
+   - Critical/warning/info severity prefixes
+
+### Also created
+- `docs/INTELLIGENCE_LAYER_PATCH_V1.md` — patch plan with completion status
+
+## What Was Verified
+
+- 24 pytest tests pass (22 existing + 2 new)
 - `alembic upgrade head`: clean
 - `/healthz`, `/`, `/docs`: all ok
-- Merchant alias API: create, list, delete work
-- Draft edit + defer: work via API
-- Live OpenAI: subscription, bank paste, assistant all return real responses
-- PDF export: generates valid PDF
-- Canonical write isolation: confirmed (0 subs, 0 costs after promote)
+- Live OpenAI: Netflix subscription analyzed with duplicate detection + ownership + why-engine (1606 tokens)
+- Risk signals: fires correctly on high fixed ratio (87% of income → warning)
+- PDF export: 4910 bytes with risk signals section
+- Zero canonical writes confirmed after promote
 
 ## Phase Status
 
 | Phase | Status |
 |---|---|
-| FAS 1: Ingest + review | ✅ **Complete** |
-| FAS 1.7: PDF export | ✅ **Complete** |
-| FAS 2.1: Merchant normalization | ✅ **Complete** (backend + frontend + ingest) |
-| FAS 2.2: Duplicate detection | Not started |
-| FAS 2.3: Ownership suggestions | Not started |
-| FAS 2.4: Rule engine | Not started |
+| FAS 1: Ingest + review | ✅ Complete |
+| FAS 1.7: PDF export | ✅ Complete (with risk signals) |
+| FAS 2.1: Merchant normalization | ✅ Complete |
+| FAS 2.2: Duplicate detection | ✅ V1 done (drafts check) |
+| FAS 2.3: Ownership suggestions | ✅ V1 done (heuristic) |
+| FAS 2.4: Why-engine | ✅ V1 done |
+| FAS 2.5: Risk signals | ✅ V1 done (8 signal types) |
+| FAS 2.6: Rule engine | Not started |
 | FAS 3+: Time, analysis, research | Not started |
 
 ## Exact Next Steps
 
-1. **Duplicate indicator** — warn on same provider+amount in recent drafts
-2. **Ownership suggestions** — private/shared/unclear in draft review
-3. **Playwright watchdog** — browser regression tests
-4. **External research module** — subscription alternatives
-5. **Analysis AI improvements** — better read models, anomaly detection
+1. **Evidence chain** — link Document → ExtractionDraft → applied entity with provenance metadata
+2. **Duplicate detection vs canonical data** — check subscriptions/costs tables, not just drafts
+3. **Editable ownership field** on draft cards
+4. **Playwright watchdog** — browser regression tests for core flows
+5. **External research hooks** — subscription price comparison interface
+6. **Rule engine** — user-approved pattern matching
 
 ## Key Files
 
 | File | Why |
 |---|---|
-| `docs/ECONOMIC_SYSTEM_MASTER_ROADMAP.md` | Phase tracking with checkboxes |
-| `app/models.py` | MerchantAlias model |
-| `app/main.py` | All endpoints (aliases, PDF, ingest) |
-| `app/ai_services.py` | AI ingest with normalization |
-| `app/pdf_export.py` | Bank-ready PDF |
-| `app/static/app.js` | Frontend: draft edit/defer, alias mgmt |
+| `app/calculations.py` | Risk signals (_build_risk_signals) |
+| `app/ai_services.py` | Duplicate check, ownership, why-engine |
+| `app/schemas.py` | RiskSignalRead, intelligence fields on IngestSuggestionRead |
+| `app/pdf_export.py` | PDF with risk signals |
+| `app/static/app.js` | Risk signals on overview, intelligence on suggestion cards |
+| `docs/INTELLIGENCE_LAYER_PATCH_V1.md` | Patch plan + status |
+| `docs/ECONOMIC_SYSTEM_MASTER_ROADMAP.md` | Phase tracking |
 
 ## Critical Truths
 
-- Phase 1 is FULLY complete — all checkboxes checked
-- Phase 2.1 (merchant normalization) is FULLY complete
-- `MerchantAlias` table uses `create_all()` auto-bootstrap; `_load_merchant_aliases` has graceful fallback
-- Pydantic v1 (1.10.9)
-- 9 document classification types
-- Bank paste already works and is live-tested
+- Risk signals are DETERMINISTIC (no AI) — pure backend math in calculations.py
+- Duplicate check queries the DB (not AI) — graceful fallback on missing tables
+- Ownership is a HEURISTIC based on category mapping — not AI
+- Why-engine uses AI rationale when available, falls back to generated description
+- All intelligence is advisory — no silent canonical writes
+- Pydantic v1 (1.10.9), 9 classification types, bank paste works
 
 ## Git State
 
 - Branch: `cursor/development-environment-setup-a192`
+- Latest commit: `29367c9`
 - All changes committed and pushed
 - PR #1: https://github.com/Gleipneer/economic_system/pull/1

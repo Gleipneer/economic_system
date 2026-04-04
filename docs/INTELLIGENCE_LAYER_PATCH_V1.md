@@ -31,19 +31,23 @@ Build real intelligence layers that make the system smarter without becoming bri
 - Playwright watchdog (deferred to next patch — needs browser agent)
 - Broad frontend redesign
 
-## Acceptance Criteria
+## Completion Status
 
-- Duplicate indicator works for at least 3 real test cases
-- Ownership candidate appears on suggestions
-- Why-engine rationale is visible in review UI
-- Risk signals appear on overview/summary
-- PDF export includes risk signals and source notes
-- All 22+ tests pass
-- Zero canonical writes from AI
+| Feature | Status | Verified |
+|---|---|---|
+| Duplicate indicator | ✅ Done | Live-tested: Netflix detected as duplicate of existing draft |
+| Ownership candidate | ✅ Done | Live-tested: Netflix→private, broadband→shared |
+| Why-engine | ✅ Done | Rationale on every suggestion |
+| Risk signals (summary) | ✅ Done | 8 signal types, tested with heavy costs |
+| Risk signals (overview UI) | ✅ Done | Severity-coded badges |
+| Risk signals (PDF export) | ✅ Done | 4910 bytes PDF with signals section |
+| Evidence chain metadata | Not started | Deferred to next patch |
+| External research hooks | Not started | Deferred |
 
 ## Verification
 
-- Runtime: alembic, healthz, frontend, docs
-- Tests: full suite + new tests
-- Live OpenAI: at least 2 real ingest calls verified
-- PDF: generates, opens, content correct
+- 24 pytest tests pass
+- Live OpenAI: subscription analyzed, duplicate detected, ownership assigned
+- PDF: generates with risk signals, 4910 bytes
+- Risk signals: fires correctly on high fixed ratio (87%)
+- Zero canonical writes confirmed

@@ -115,14 +115,30 @@ underlag
 - [x] Frontend: hantera aliases i UI (lista, skapa, ta bort) på Documents-sidan
 
 ### 2.2 Dubblettkontroll
-- [ ] Detektera om samma faktura kom in via PDF och screenshot
-- [ ] Varna vid möjlig dubblett i review queue
+- [x] Detektera dubbletter mot väntande drafts (samma provider+belopp)
+- [x] Visa duplicate_indicator i review UI
+- [ ] Detektera dubbletter mot kanonisk data (subscriptions, recurring costs)
+- [ ] Varna vid samma underlag i annan kanal (PDF vs screenshot)
 
 ### 2.3 Ownership-förslag
-- [ ] Föreslå privat / gemensam / oklar ägare
-- [ ] Relevant för tvåpersonershushåll
+- [x] ownership_candidate (private/shared/unclear) på varje suggestion
+- [x] Heuristik baserad på kategori och leverantörstyp
+- [x] Visas i review UI med färgkodad badge
+- [ ] Redigerbart ownership-fält i draft editing
 
-### 2.4 Regelmotor
+### 2.4 Förklaringsmotor (Why-Engine)
+- [x] why_suggested fält på varje suggestion
+- [x] AI-rationale eller genererad förklaring
+- [x] Visas i review UI
+- [ ] Utöka med evidenskedja (document → extraction → classification → suggestion)
+
+### 2.5 Risksignaler
+- [x] risk_signals på household summary (8 signaltyper)
+- [x] Visas på översiktssidan med severity-badges
+- [x] Inkluderas i PDF-export
+- [ ] Fler signaler: ovanliga kostnadsökningar, nya återkommande poster
+
+### 2.6 Regelmotor
 - [ ] Användaren kan godkänna mönster (t.ex. "Google One = abonnemang")
 - [ ] Regler tillämpas vid framtida ingest
 
