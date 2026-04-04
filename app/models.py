@@ -353,7 +353,8 @@ class Document(Base):
     vat_amount = Column(Float, nullable=True)
     currency = Column(String, nullable=True)
     extracted_text = Column(Text, nullable=True)
-    extraction_status = Column(String, default="pending")  # pending, parsed, reviewed, rejected
+    extraction_status = Column(String, default="uploaded")  # uploaded, interpreted, pending_review, applied, failed
+    processing_error = Column(Text, nullable=True)
     storage_path = Column(String, nullable=True)
     uploaded_at = Column(DateTime, default=datetime.utcnow)
     # Relationships
@@ -370,9 +371,14 @@ class ExtractionDraft(Base):
     document_id = Column(Integer, ForeignKey("documents.id", ondelete="CASCADE"), nullable=False)
     target_entity_type = Column(String, nullable=False)  # transaction, contract, loan, insurance, income
     proposed_json = Column(JSON, nullable=False)
+    review_json = Column(JSON, nullable=True)
     confidence = Column(Float, nullable=True)
-    status = Column(String, default="pending_review")  # pending_review, approved, rejected, revised
+    status = Column(String, default="pending_review")  # pending_review, deferred, approved, rejected, apply_failed
     model_name = Column(String, nullable=True)
+    canonical_target_entity_type = Column(String, nullable=True)
+    canonical_target_entity_id = Column(Integer, nullable=True)
+    review_error = Column(Text, nullable=True)
+    applied_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     # Relationships
     household = relationship("Household", back_populates="extraction_drafts")

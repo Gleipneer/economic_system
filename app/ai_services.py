@@ -670,7 +670,27 @@ def _ingest_field_guides(records: dict[str, list[dict[str, Any]]]) -> dict[str, 
         },
         "loan_shape": {
             "required": ["type"],
-            "optional": ["person_id", "lender", "current_balance", "required_monthly_payment", "remaining_term_months", "note"],
+            "optional": [
+                "person_id",
+                "lender",
+                "current_balance",
+                "required_monthly_payment",
+                "remaining_term_months",
+                "nominal_rate",
+                "amortization_amount_monthly",
+                "due_day",
+                "purpose",
+                "note",
+                "interest_rate",
+                "debt_before_amortization",
+                "payment_amount",
+                "payment_due_date",
+                "object_vehicle",
+                "contract_number",
+                "amortization",
+                "interest_cost",
+                "fees",
+            ],
         },
         "income_source_shape": {
             "required": ["person_id", "type"],
@@ -763,8 +783,10 @@ def _validated_ingest_suggestion(
         if not isinstance(parsed_json, dict):
             raise ValueError("proposed_json måste vara ett JSON-objekt.")
         proposed_json = dict(parsed_json)
+        review_json = dict(parsed_json)
     except (TypeError, ValueError, json.JSONDecodeError) as exc:
         proposed_json = {}
+        review_json = {}
         validation_errors = [f"proposed_json kunde inte läsas som JSON-objekt: {exc}"]
     else:
         validation_errors: list[str] = []
@@ -804,6 +826,7 @@ def _validated_ingest_suggestion(
         rationale=suggestion.rationale,
         confidence=suggestion.confidence,
         proposed_json=proposed_json,
+        review_json=review_json,
         validation_status="invalid" if validation_errors else "valid",
         validation_errors=validation_errors,
         uncertainty_notes=suggestion.uncertainty_notes,
@@ -970,12 +993,12 @@ def promote_ingest_suggestions(
         document = _get_household_document_or_404(db, household_id, request_body.document_id)
         if not document.extracted_text and normalized_input_text:
             document.extracted_text = normalized_input_text
-            document.extraction_status = "parsed"
+            document.extraction_status = "interpreted"
         elif not document.extracted_text:
             document_text, _, _ = _read_uploaded_document_text(document)
             if document_text:
                 document.extracted_text = document_text
-                document.extraction_status = "parsed"
+                document.extraction_status = "interpreted"
         if not document.extracted_text:
             raise AIProviderResponseError("Det befintliga dokumentet saknar extraherbar text.")
         document_type = _apply_document_summary_to_document(
@@ -1000,7 +1023,7 @@ def promote_ingest_suggestions(
             mime_type="text/plain",
             issuer=request_body.source_name,
             extracted_text=normalized_input_text,
-            extraction_status="parsed",
+            extraction_status="interpreted",
         )
         db.add(document)
         db.flush()
@@ -1014,6 +1037,8 @@ def promote_ingest_suggestions(
     if document is None:
         raise AIProviderResponseError("Promote kunde inte knyta an till ett dokument.")
 
+    document.extraction_status = "pending_review"
+    document.processing_error = None
     created_drafts: list[schemas.CreatedDraftRead] = []
     for suggestion in valid_suggestions:
         draft = models.ExtractionDraft(
@@ -1021,6 +1046,7 @@ def promote_ingest_suggestions(
             document_id=document.id,
             target_entity_type=suggestion.target_entity_type,
             proposed_json=suggestion.proposed_json,
+            review_json=suggestion.review_json,
             confidence=suggestion.confidence,
             status="pending_review",
             model_name=(
@@ -1037,6 +1063,7 @@ def promote_ingest_suggestions(
                 target_entity_type=draft.target_entity_type,
                 confidence=draft.confidence,
                 validation_status=suggestion.validation_status,
+                document_status=document.extraction_status,
             )
         )
 

@@ -495,7 +495,8 @@ class DocumentBase(BaseModel):
     vat_amount: Optional[float] = None
     currency: Optional[str] = None
     extracted_text: Optional[str] = None
-    extraction_status: Optional[str] = Field(default="pending")
+    extraction_status: Optional[str] = Field(default="uploaded")
+    processing_error: Optional[str] = None
     storage_path: Optional[str] = None
 
 
@@ -518,6 +519,7 @@ class DocumentUpdate(DocumentBase):
     currency: Optional[str] = None
     extracted_text: Optional[str] = None
     extraction_status: Optional[str] = None
+    processing_error: Optional[str] = None
     storage_path: Optional[str] = None
 
 
@@ -535,9 +537,13 @@ class ExtractionDraftBase(BaseModel):
     document_id: int
     target_entity_type: str
     proposed_json: Any
+    review_json: Optional[Any] = None
     confidence: Optional[float] = None
     status: Optional[str] = Field(default="pending_review")
     model_name: Optional[str] = None
+    canonical_target_entity_type: Optional[str] = None
+    canonical_target_entity_id: Optional[int] = None
+    review_error: Optional[str] = None
 
 
 class ExtractionDraftCreate(ExtractionDraftBase):
@@ -549,17 +555,60 @@ class ExtractionDraftUpdate(ExtractionDraftBase):
     document_id: Optional[int] = None
     target_entity_type: Optional[str] = None
     proposed_json: Optional[Any] = None
+    review_json: Optional[Any] = None
     confidence: Optional[float] = None
     status: Optional[str] = None
     model_name: Optional[str] = None
+    canonical_target_entity_type: Optional[str] = None
+    canonical_target_entity_id: Optional[int] = None
+    review_error: Optional[str] = None
 
 
 class ExtractionDraftRead(ExtractionDraftBase):
     id: int
+    applied_at: Optional[datetime] = None
     created_at: datetime
 
     class Config:
         orm_mode = True
+
+
+class DocumentKeyFieldRead(BaseModel):
+    key: str
+    label: str
+    value: str
+    source: Literal["document", "draft_review", "draft_canonical", "canonical_record"]
+
+
+class CanonicalLinkRead(BaseModel):
+    draft_id: int
+    target_entity_type: str
+    target_entity_id: int
+    target_label: str
+    applied_at: Optional[datetime] = None
+
+
+class DocumentWorkflowRead(BaseModel):
+    document: DocumentRead
+    workflow_status: Literal["uploaded", "interpreted", "pending_review", "applied", "failed"]
+    status_detail: Optional[str] = None
+    drafts: List[ExtractionDraftRead] = Field(default_factory=list)
+    key_fields: List[DocumentKeyFieldRead] = Field(default_factory=list)
+    canonical_links: List[CanonicalLinkRead] = Field(default_factory=list)
+
+
+class ExtractionDraftApplyRequest(BaseModel):
+    action: Literal["create_new", "link_existing"] = "create_new"
+    target_entity_id: Optional[int] = None
+    proposed_json: Optional[Dict[str, Any]] = None
+
+    @root_validator(allow_reuse=True)
+    def validate_link_existing(cls, values):
+        action = values.get("action")
+        target_entity_id = values.get("target_entity_id")
+        if action == "link_existing" and target_entity_id is None:
+            raise ValueError("Skicka target_entity_id när draft ska kopplas till befintligt objekt.")
+        return values
 
 
 # -------- OptimizationOpportunity --------
@@ -803,6 +852,7 @@ class IngestSuggestionRead(BaseModel):
     rationale: str
     confidence: Optional[confloat(ge=0.0, le=1.0)] = None
     proposed_json: Dict[str, Any]
+    review_json: Dict[str, Any] = Field(default_factory=dict)
     validation_status: Literal["valid", "invalid"] = "valid"
     validation_errors: List[str] = Field(default_factory=list)
     uncertainty_notes: List[str] = Field(default_factory=list)
@@ -917,6 +967,7 @@ class CreatedDraftRead(BaseModel):
     target_entity_type: str
     confidence: Optional[confloat(ge=0.0, le=1.0)] = None
     validation_status: str
+    document_status: Optional[str] = None
 
 
 class IngestPromoteResponse(BaseModel):

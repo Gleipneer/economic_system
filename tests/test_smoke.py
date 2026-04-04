@@ -1,5 +1,6 @@
 import importlib
 import io
+import json
 import os
 import subprocess
 import sys
@@ -340,7 +341,7 @@ def test_summary_document_scenario_and_report_flow(tmp_path):
         assert upload.status_code == 201
         document_id = upload.json()["id"]
         assert upload.json()["extracted_text"] == "resurs invoice"
-        assert upload.json()["extraction_status"] == "parsed"
+        assert upload.json()["extraction_status"] == "interpreted"
 
         download = client.get(f"/documents/{document_id}/download")
         assert download.status_code == 200
@@ -687,7 +688,7 @@ def test_document_upload_handles_image_with_ocr(tmp_path):
         )
         assert upload.status_code == 201
         payload = upload.json()
-        assert payload["extraction_status"] in {"parse_failed", "ocr_parsed"}
+        assert payload["extraction_status"] in {"failed", "interpreted", "uploaded"}
 
 
 def test_normalize_ingest_text_handles_pdf_paste_artifacts():
@@ -982,3 +983,277 @@ def test_ingest_suggestion_has_intelligence_fields(tmp_path, monkeypatch):
         assert suggestion["ownership_candidate"] == "private"
         assert "why_suggested" in suggestion
         assert len(suggestion["why_suggested"]) > 0
+        assert "review_json" in suggestion
+
+
+def test_document_review_flow_for_loan_invoice_upload_and_apply(tmp_path):
+    app = load_app(tmp_path)
+    with TestClient(app) as client:
+        ids = create_household_fixture(client)
+        household_id = ids["household_id"]
+
+        upload = client.post(
+            "/documents/upload",
+            data={"household_id": str(household_id), "document_type": "loan_statement", "issuer": "Volvofinans"},
+            files={
+                "file": (
+                    "loan_invoice.txt",
+                    io.BytesIO(
+                        (
+                            "Volvofinans låneavi\n"
+                            "Kontraktsnummer VF-7788\n"
+                            "Objekt Volvo XC60\n"
+                            "Ränta 6.45\n"
+                            "Skuld före amortering 185000\n"
+                            "Belopp att betala 4525\n"
+                            "Förfallodatum 2026-05-28\n"
+                            "Amortering 3100\n"
+                            "Räntekostnad 1180\n"
+                            "Avgifter 245\n"
+                        ).encode("utf-8")
+                    ),
+                    "text/plain",
+                )
+            },
+        )
+        assert upload.status_code == 201
+        document_id = upload.json()["id"]
+        assert upload.json()["extraction_status"] == "interpreted"
+
+        promote = client.post(
+            f"/households/{household_id}/ingest_ai/promote",
+            json={
+                "document_id": document_id,
+                "source_channel": "uploaded_document",
+                "source_name": "Volvofinans",
+                "provider": "openai",
+                "model": "gpt-test",
+                "document_summary": {
+                    "document_type": "loan_or_credit",
+                    "provider_name": "Volvofinans",
+                    "label": "Volvofinans låneavi",
+                    "amount": 4525,
+                    "currency": "SEK",
+                    "due_date": "2026-05-28",
+                    "cadence": "monthly",
+                    "category_hint": "vehicle",
+                    "suggested_target_entity_type": "loan",
+                    "household_relevance": "high",
+                    "confidence": 0.96,
+                    "confirmed_fields": ["provider_name", "amount", "due_date"],
+                    "notes": [],
+                    "uncertainty_reasons": [],
+                },
+                "suggestions": [
+                    {
+                        "target_entity_type": "loan",
+                        "review_bucket": "loan",
+                        "title": "Volvofinans billån",
+                        "rationale": "Tydlig låneavi.",
+                        "confidence": 0.91,
+                        "proposed_json": {
+                            "household_id": household_id,
+                            "type": "car",
+                            "lender": "Volvofinans",
+                            "current_balance": 185000,
+                            "required_monthly_payment": 4525,
+                            "nominal_rate": 6.45,
+                            "amortization_amount_monthly": 3100,
+                            "purpose": "Volvo XC60",
+                            "status": "active",
+                        },
+                        "review_json": {
+                            "lender": "Volvofinans",
+                            "interest_rate": 6.45,
+                            "debt_before_amortization": 185000,
+                            "payment_amount": 4525,
+                            "payment_due_date": "2026-05-28",
+                            "object_vehicle": "Volvo XC60",
+                            "contract_number": "VF-7788",
+                            "amortization": 3100,
+                            "interest_cost": 1180,
+                            "fees": 245,
+                        },
+                        "validation_status": "valid",
+                        "validation_errors": [],
+                        "uncertainty_notes": [],
+                    }
+                ],
+            },
+        )
+        assert promote.status_code == 200
+        draft_id = promote.json()["created_drafts"][0]["draft_id"]
+
+        review = client.get(f"/documents/{document_id}/review")
+        assert review.status_code == 200
+        review_payload = review.json()
+        assert review_payload["workflow_status"] == "pending_review"
+        labels = {item["label"]: item["value"] for item in review_payload["key_fields"]}
+        assert labels["Långivare"] == "Volvofinans"
+        assert labels["Ränta"] == "6.45"
+        assert labels["Skuld före amortering"] == "185000"
+        assert labels["Belopp att betala"] == "4525"
+        assert labels["Förfallodatum"] == "2026-05-28"
+        assert labels["Objekt / bil"] == "Volvo XC60"
+        assert labels["Kontraktsnummer"] == "VF-7788"
+        assert labels["Amortering"] == "3100"
+        assert labels["Räntekostnad"] == "1180"
+        assert labels["Avgifter"] == "245"
+
+        apply_response = client.post(f"/extraction_drafts/{draft_id}/apply", json={"action": "create_new"})
+        assert apply_response.status_code == 200
+        loan_id = apply_response.json()["target_entity_id"]
+
+        loan = client.get(f"/loans/{loan_id}")
+        assert loan.status_code == 200
+        loan_payload = loan.json()
+        assert loan_payload["lender"] == "Volvofinans"
+        assert loan_payload["nominal_rate"] == 6.45
+        assert loan_payload["current_balance"] == 185000
+        assert loan_payload["required_monthly_payment"] == 4525
+        assert loan_payload["amortization_amount_monthly"] == 3100
+        assert loan_payload["due_day"] == 28
+        assert loan_payload["purpose"] == "Volvo XC60"
+        assert loan_payload["statement_doc_id"] == document_id
+        assert "VF-7788" in (loan_payload["note"] or "")
+
+        applied_review = client.get(f"/documents/{document_id}/review")
+        assert applied_review.status_code == 200
+        applied_payload = applied_review.json()
+        assert applied_payload["workflow_status"] == "applied"
+        assert applied_payload["canonical_links"][0]["target_entity_type"] == "loan"
+        assert applied_payload["canonical_links"][0]["target_entity_id"] == loan_id
+
+
+def test_draft_can_link_document_to_existing_loan(tmp_path):
+    app = load_app(tmp_path)
+    with TestClient(app) as client:
+        ids = create_household_fixture(client)
+        household_id = ids["household_id"]
+
+        loan = client.post(
+            "/loans",
+            json={
+                "household_id": household_id,
+                "type": "car",
+                "lender": "Volvofinans",
+                "purpose": "Bil",
+                "status": "active",
+            },
+        )
+        assert loan.status_code == 201
+        loan_id = loan.json()["id"]
+
+        document = client.post(
+            "/documents",
+            json={
+                "household_id": household_id,
+                "document_type": "loan_statement",
+                "file_name": "existing-loan.txt",
+                "mime_type": "text/plain",
+                "extracted_text": "Volvofinans avi",
+                "extraction_status": "interpreted",
+            },
+        )
+        assert document.status_code == 201
+        document_id = document.json()["id"]
+
+        draft = client.post(
+            "/extraction_drafts",
+            json={
+                "household_id": household_id,
+                "document_id": document_id,
+                "target_entity_type": "loan",
+                "proposed_json": {
+                    "household_id": household_id,
+                    "type": "car",
+                    "lender": "Volvofinans",
+                    "required_monthly_payment": 3990,
+                    "current_balance": 120000,
+                },
+                "review_json": {
+                    "lender": "Volvofinans",
+                    "payment_amount": 3990,
+                    "debt_before_amortization": 120000,
+                    "contract_number": "VF-LINK-1",
+                },
+                "status": "pending_review",
+            },
+        )
+        assert draft.status_code == 201
+        draft_id = draft.json()["id"]
+
+        apply_response = client.post(
+            f"/extraction_drafts/{draft_id}/apply",
+            json={"action": "link_existing", "target_entity_id": loan_id},
+        )
+        assert apply_response.status_code == 200
+
+        updated = client.get(f"/loans/{loan_id}")
+        assert updated.status_code == 200
+        updated_payload = updated.json()
+        assert updated_payload["required_monthly_payment"] == 3990
+        assert updated_payload["current_balance"] == 120000
+        assert updated_payload["statement_doc_id"] == document_id
+        assert "VF-LINK-1" in (updated_payload["note"] or "")
+
+        review = client.get(f"/documents/{document_id}/review")
+        assert review.status_code == 200
+        payload = review.json()
+        assert payload["workflow_status"] == "applied"
+        assert payload["canonical_links"][0]["target_entity_id"] == loan_id
+
+
+def test_assistant_context_excludes_pending_document_review_values(tmp_path):
+    app = load_app(tmp_path)
+    from app import ai_services, database
+
+    with TestClient(app) as client:
+        ids = create_household_fixture(client)
+        household_id = ids["household_id"]
+
+        document = client.post(
+            "/documents",
+            json={
+                "household_id": household_id,
+                "document_type": "loan_statement",
+                "file_name": "secret-review.txt",
+                "mime_type": "text/plain",
+                "extracted_text": "Pending review loan document",
+                "extraction_status": "pending_review",
+            },
+        )
+        assert document.status_code == 201
+        document_id = document.json()["id"]
+
+        draft = client.post(
+            "/extraction_drafts",
+            json={
+                "household_id": household_id,
+                "document_id": document_id,
+                "target_entity_type": "loan",
+                "proposed_json": {
+                    "household_id": household_id,
+                    "type": "car",
+                    "lender": "Top secret lender",
+                    "required_monthly_payment": 9999,
+                },
+                "review_json": {
+                    "contract_number": "SECRET-DOC-CONTRACT-42",
+                    "payment_amount": 9999,
+                },
+                "status": "pending_review",
+            },
+        )
+        assert draft.status_code == 201
+
+        db = database.SessionLocal()
+        try:
+            context = ai_services._compact_household_context(db, household_id)
+        finally:
+            db.close()
+
+        dumped = json.dumps(context, ensure_ascii=False)
+        assert "SECRET-DOC-CONTRACT-42" not in dumped
+        assert "Top secret lender" not in dumped
+        assert context["document_counts"]["drafts_pending_review"] >= 1

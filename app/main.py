@@ -22,12 +22,12 @@ authentication and transport security is applied at the proxy layer.
 """
 
 import hashlib
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from uuid import uuid4
-from typing import List
+from typing import Any, List
 
-from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form, status
+from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form, Body, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -97,6 +97,221 @@ def home():
 
 def ensure_household_exists(db: Session, household_id: int):
     return get_object_or_404(db, models.Household, household_id)
+
+
+DOCUMENT_WORKFLOW_STATUS = {"uploaded", "interpreted", "pending_review", "applied", "failed"}
+
+LOAN_REVIEW_FIELD_LABELS = {
+    "lender": "Långivare",
+    "interest_rate": "Ränta",
+    "nominal_rate": "Ränta",
+    "debt_before_amortization": "Skuld före amortering",
+    "current_balance": "Skuld före amortering",
+    "payment_amount": "Belopp att betala",
+    "required_monthly_payment": "Belopp att betala",
+    "payment_due_date": "Förfallodatum",
+    "due_date": "Förfallodatum",
+    "object_vehicle": "Objekt / bil",
+    "purpose": "Objekt / bil",
+    "contract_number": "Kontraktsnummer",
+    "amortization": "Amortering",
+    "amortization_amount_monthly": "Amortering",
+    "interest_cost": "Räntekostnad",
+    "interest_cost_amount": "Räntekostnad",
+    "fees": "Avgifter",
+    "fee_amount": "Avgifter",
+}
+
+
+def _status_for_uploaded_document(extracted_text: str | None, extraction_mode: str) -> tuple[str, str | None]:
+    if extracted_text and extracted_text.strip():
+        return "interpreted", None
+    if extraction_mode in {"unsupported_binary", "pdf_unreadable", "ocr_image_unreadable", "ocr_failed", "ocr_no_text"}:
+        return "failed", f"Det gick inte att tolka dokumentet ({extraction_mode})."
+    return "uploaded", None
+
+
+def _draft_status_detail(drafts: list[models.ExtractionDraft]) -> str | None:
+    if any(d.status == "apply_failed" for d in drafts):
+        failed = next((d for d in drafts if d.status == "apply_failed" and d.review_error), None)
+        return failed.review_error if failed else "Ett utkast kunde inte appliceras."
+    if any(d.status == "pending_review" for d in drafts):
+        count = sum(1 for d in drafts if d.status == "pending_review")
+        return f"{count} utkast väntar på granskning."
+    if any(d.status == "approved" and d.canonical_target_entity_id for d in drafts):
+        count = sum(1 for d in drafts if d.status == "approved" and d.canonical_target_entity_id)
+        return f"{count} utkast har applicerats till kanonisk data."
+    return None
+
+
+def _derive_document_workflow_status(document: models.Document, drafts: list[models.ExtractionDraft]) -> tuple[str, str | None]:
+    if document.processing_error:
+        return "failed", document.processing_error
+    if any(d.status == "apply_failed" for d in drafts):
+        return "failed", _draft_status_detail(drafts)
+    if any(d.status == "pending_review" for d in drafts):
+        return "pending_review", _draft_status_detail(drafts)
+    if any(d.status == "approved" and d.canonical_target_entity_id for d in drafts):
+        return "applied", _draft_status_detail(drafts)
+    if document.extracted_text:
+        return "interpreted", "Dokumentet har tolkats men inte blivit reviewutkast ännu."
+    return "uploaded", "Dokumentet är uppladdat men ännu inte tolkat."
+
+
+def _update_document_workflow_status(document: models.Document) -> tuple[str, str | None]:
+    status_value, detail = _derive_document_workflow_status(document, list(document.extraction_drafts or []))
+    document.extraction_status = status_value
+    if status_value != "failed":
+        document.processing_error = None
+    return status_value, detail
+
+
+def _parse_iso_date(value: Any) -> date | None:
+    if isinstance(value, date):
+        return value
+    if isinstance(value, str):
+        try:
+            return date.fromisoformat(value)
+        except ValueError:
+            return None
+    return None
+
+
+def _stringify_review_value(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, float):
+        return str(round(value, 2))
+    if isinstance(value, (date, datetime)):
+        return value.isoformat()
+    text = str(value).strip()
+    return text or None
+
+
+def _canonical_target_label(entity_type: str, entity: Any) -> str:
+    if entity_type == "loan":
+        lender = getattr(entity, "lender", None) or "Lån"
+        purpose = getattr(entity, "purpose", None)
+        return f"{lender} · {purpose}" if purpose else lender
+    return getattr(entity, "name", None) or getattr(entity, "title", None) or f"{entity_type} #{entity.id}"
+
+
+def _build_document_key_fields(document: models.Document, drafts: list[models.ExtractionDraft], db: Session) -> list[schemas.DocumentKeyFieldRead]:
+    seen: set[tuple[str, str, str]] = set()
+    key_fields: list[schemas.DocumentKeyFieldRead] = []
+
+    def add_field(key: str, label: str, value: Any, source: str) -> None:
+        rendered = _stringify_review_value(value)
+        if not rendered:
+            return
+        token = (key, rendered, source)
+        if token in seen:
+            return
+        seen.add(token)
+        key_fields.append(
+            schemas.DocumentKeyFieldRead(key=key, label=label, value=rendered, source=source)
+        )
+
+    add_field("file_name", "Dokument", document.file_name, "document")
+    add_field("issuer", "Avsändare", document.issuer, "document")
+    add_field("total_amount", "Belopp", document.total_amount, "document")
+    add_field("issue_date", "Dokumentdatum", document.issue_date, "document")
+
+    for draft in drafts:
+        review_payload = dict(draft.review_json or {})
+        canonical_payload = dict(draft.proposed_json or {})
+        source = "draft_review" if review_payload else "draft_canonical"
+        payload = review_payload or canonical_payload
+        if draft.target_entity_type == "loan":
+            for key, label in LOAN_REVIEW_FIELD_LABELS.items():
+                add_field(key, label, payload.get(key), source)
+        else:
+            add_field("title", "Titel", payload.get("title") or payload.get("provider") or payload.get("vendor"), source)
+            add_field("amount", "Belopp", payload.get("amount") or payload.get("current_monthly_cost"), source)
+
+        if draft.canonical_target_entity_type and draft.canonical_target_entity_id:
+            model_map = {"loan": models.Loan}
+            model_class = model_map.get(draft.canonical_target_entity_type)
+            if model_class is not None:
+                entity = db.get(model_class, draft.canonical_target_entity_id)
+                if entity is not None and draft.canonical_target_entity_type == "loan":
+                    add_field("canonical_lender", "Kopplat lån", _canonical_target_label("loan", entity), "canonical_record")
+                    add_field("canonical_current_balance", "Aktuell skuld", getattr(entity, "current_balance", None), "canonical_record")
+                    add_field("canonical_required_monthly_payment", "Månad att betala", getattr(entity, "required_monthly_payment", None), "canonical_record")
+    return key_fields
+
+
+def _build_document_workflow_read(db: Session, document: models.Document) -> schemas.DocumentWorkflowRead:
+    drafts = (
+        db.query(models.ExtractionDraft)
+        .filter_by(document_id=document.id)
+        .order_by(models.ExtractionDraft.created_at.desc())
+        .all()
+    )
+    status_value, detail = _derive_document_workflow_status(document, drafts)
+    document.extraction_status = status_value
+    canonical_links: list[schemas.CanonicalLinkRead] = []
+    for draft in drafts:
+        if not draft.canonical_target_entity_type or not draft.canonical_target_entity_id:
+            continue
+        model_map = {"loan": models.Loan}
+        model_class = model_map.get(draft.canonical_target_entity_type)
+        entity = db.get(model_class, draft.canonical_target_entity_id) if model_class is not None else None
+        target_label = _canonical_target_label(draft.canonical_target_entity_type, entity) if entity is not None else f"{draft.canonical_target_entity_type} #{draft.canonical_target_entity_id}"
+        canonical_links.append(
+            schemas.CanonicalLinkRead(
+                draft_id=draft.id,
+                target_entity_type=draft.canonical_target_entity_type,
+                target_entity_id=draft.canonical_target_entity_id,
+                target_label=target_label,
+                applied_at=draft.applied_at,
+            )
+        )
+
+    return schemas.DocumentWorkflowRead(
+        document=document,
+        workflow_status=status_value,
+        status_detail=detail,
+        drafts=drafts,
+        key_fields=_build_document_key_fields(document, drafts, db),
+        canonical_links=canonical_links,
+    )
+
+
+def _append_loan_note(existing_note: str | None, review_payload: dict[str, Any]) -> str | None:
+    extras = []
+    if review_payload.get("contract_number"):
+        extras.append(f"Kontraktsnummer: {review_payload['contract_number']}")
+    if review_payload.get("interest_cost") is not None or review_payload.get("interest_cost_amount") is not None:
+        extras.append(f"Räntekostnad: {review_payload.get('interest_cost') or review_payload.get('interest_cost_amount')}")
+    if review_payload.get("fees") is not None or review_payload.get("fee_amount") is not None:
+        extras.append(f"Avgifter: {review_payload.get('fees') or review_payload.get('fee_amount')}")
+    if review_payload.get("payment_due_date"):
+        extras.append(f"Förfallodatum: {review_payload['payment_due_date']}")
+    note_parts = [part for part in [existing_note] + extras if part]
+    return "\n".join(note_parts) if note_parts else None
+
+
+def _enrich_loan_payload(canonical_payload: dict[str, Any], review_payload: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(canonical_payload)
+    if "household_id" not in payload and review_payload.get("household_id") is not None:
+        payload["household_id"] = review_payload["household_id"]
+    if payload.get("current_balance") is None and review_payload.get("debt_before_amortization") is not None:
+        payload["current_balance"] = review_payload["debt_before_amortization"]
+    if payload.get("required_monthly_payment") is None and review_payload.get("payment_amount") is not None:
+        payload["required_monthly_payment"] = review_payload["payment_amount"]
+    if payload.get("nominal_rate") is None and review_payload.get("interest_rate") is not None:
+        payload["nominal_rate"] = review_payload["interest_rate"]
+    if payload.get("amortization_amount_monthly") is None and review_payload.get("amortization") is not None:
+        payload["amortization_amount_monthly"] = review_payload["amortization"]
+    if payload.get("purpose") in {None, ""} and review_payload.get("object_vehicle"):
+        payload["purpose"] = review_payload["object_vehicle"]
+    due_date_value = review_payload.get("payment_due_date") or review_payload.get("due_date")
+    parsed_due_date = _parse_iso_date(due_date_value)
+    if payload.get("due_day") is None and parsed_due_date is not None:
+        payload["due_day"] = parsed_due_date.day
+    payload["note"] = _append_loan_note(payload.get("note"), review_payload)
+    return payload
 
 
 def upload_to_disk(household_id: int, file: UploadFile) -> tuple[str, str, bytes]:
@@ -677,6 +892,8 @@ def list_documents(skip: int = 0, limit: int = 100, db: Session = Depends(get_db
 @app.post("/documents", response_model=schemas.DocumentRead, status_code=status.HTTP_201_CREATED)
 def create_document(document: schemas.DocumentCreate, db: Session = Depends(get_db)):
     db_doc = models.Document(**document.dict())
+    if db_doc.extraction_status not in DOCUMENT_WORKFLOW_STATUS:
+        db_doc.extraction_status = "interpreted" if db_doc.extracted_text else "uploaded"
     db.add(db_doc)
     db.commit()
     db.refresh(db_doc)
@@ -696,24 +913,12 @@ def upload_document(
     ensure_household_exists(db, household_id)
     storage_path, checksum, raw = upload_to_disk(household_id, file)
     extracted_payload = normalize_ingest_text(extracted_text) if extracted_text and extracted_text.strip() else None
-    extraction_status = "parsed"
+    extraction_mode = "user_provided"
     if extracted_payload is None:
         auto_extracted = extract_text_from_upload(raw, file_name=file.filename, mime_type=file.content_type)
         extracted_payload = auto_extracted.text
-        if extracted_payload:
-            extraction_status = "ocr_parsed" if auto_extracted.extraction_mode.startswith("ocr") else "parsed"
-        else:
-            extraction_status = {
-                "ocr_not_implemented": "ocr_pending",
-                "ocr_image_unreadable": "parse_failed",
-                "ocr_tesseract_missing": "ocr_pending",
-                "ocr_failed": "parse_failed",
-                "ocr_no_text": "parse_failed",
-                "ocr_missing_dependency": "ocr_pending",
-                "unsupported_binary": "unsupported",
-                "pdf_unreadable": "parse_failed",
-                "pdf_no_text": "parse_failed",
-            }.get(auto_extracted.extraction_mode, "pending")
+        extraction_mode = auto_extracted.extraction_mode
+    extraction_status, processing_error = _status_for_uploaded_document(extracted_payload, extraction_mode)
     document = models.Document(
         household_id=household_id,
         document_type=document_type,
@@ -724,6 +929,7 @@ def upload_document(
         currency=currency,
         extracted_text=extracted_payload,
         extraction_status=extraction_status,
+        processing_error=processing_error,
         storage_path=storage_path,
     )
     db.add(document)
@@ -735,6 +941,12 @@ def upload_document(
 @app.get("/documents/{doc_id}", response_model=schemas.DocumentRead)
 def read_document(doc_id: int, db: Session = Depends(get_db)):
     return get_object_or_404(db, models.Document, doc_id)
+
+
+@app.get("/documents/{doc_id}/review", response_model=schemas.DocumentWorkflowRead)
+def read_document_review(doc_id: int, db: Session = Depends(get_db)):
+    document = get_object_or_404(db, models.Document, doc_id)
+    return _build_document_workflow_read(db, document)
 
 
 @app.get("/documents/{doc_id}/download", include_in_schema=False)
@@ -755,6 +967,8 @@ def update_document(doc_id: int, document: schemas.DocumentUpdate, db: Session =
     db_doc = get_object_or_404(db, models.Document, doc_id)
     for field, value in document.dict(exclude_unset=True).items():
         setattr(db_doc, field, value)
+    if db_doc.extraction_status not in DOCUMENT_WORKFLOW_STATUS:
+        db_doc.extraction_status = "interpreted" if db_doc.extracted_text else "uploaded"
     db.commit()
     db.refresh(db_doc)
     return db_doc
@@ -778,6 +992,9 @@ def list_extraction_drafts(skip: int = 0, limit: int = 100, db: Session = Depend
 def create_extraction_draft(draft: schemas.ExtractionDraftCreate, db: Session = Depends(get_db)):
     db_draft = models.ExtractionDraft(**draft.dict())
     db.add(db_draft)
+    document = get_object_or_404(db, models.Document, draft.document_id)
+    document.extraction_status = "pending_review"
+    document.processing_error = None
     db.commit()
     db.refresh(db_draft)
     return db_draft
@@ -793,39 +1010,82 @@ def update_extraction_draft(draft_id: int, draft: schemas.ExtractionDraftUpdate,
     db_draft = get_object_or_404(db, models.ExtractionDraft, draft_id)
     for field, value in draft.dict(exclude_unset=True).items():
         setattr(db_draft, field, value)
+    document = get_object_or_404(db, models.Document, db_draft.document_id)
+    _update_document_workflow_status(document)
     db.commit()
     db.refresh(db_draft)
     return db_draft
 
 
 @app.post("/extraction_drafts/{draft_id}/apply", response_model=schemas.ExtractionApplyRead)
-def apply_extraction_draft(draft_id: int, db: Session = Depends(get_db)):
+def apply_extraction_draft(
+    draft_id: int,
+    request_body: schemas.ExtractionDraftApplyRequest | None = Body(None),
+    db: Session = Depends(get_db),
+):
     draft = get_object_or_404(db, models.ExtractionDraft, draft_id)
     if draft.status == "approved":
         raise HTTPException(status_code=400, detail="Draft already approved")
+    request_body = request_body or schemas.ExtractionDraftApplyRequest()
+    document = get_object_or_404(db, models.Document, draft.document_id)
 
     (schema_class, model_class), normalized = draft_target_config(draft.target_entity_type)
     proposed = dict(draft.proposed_json or {})
+    review_payload = dict(draft.review_json or {})
+    if request_body.proposed_json:
+        proposed.update(request_body.proposed_json)
+    if normalized == "loan":
+        proposed = _enrich_loan_payload(proposed, review_payload)
     if "household_id" in getattr(schema_class, "__fields__", {}) and "household_id" not in proposed:
         proposed["household_id"] = draft.household_id
-    payload = schema_class(**proposed)
-    entity = model_class(**payload.dict())
-    db.add(entity)
-    db.flush()
-    draft.status = "approved"
-    db.commit()
-    return {
-        "draft_id": draft.id,
-        "target_entity_type": normalized,
-        "target_entity_id": entity.id,
-        "status": draft.status,
-    }
+    try:
+        if request_body.action == "link_existing":
+            if normalized != "loan":
+                raise HTTPException(status_code=400, detail="Befintlig koppling stöds bara för lån i nuvarande review-flöde.")
+            entity = get_object_or_404(db, models.Loan, request_body.target_entity_id)
+            if entity.household_id != draft.household_id:
+                raise HTTPException(status_code=400, detail="Lånet tillhör ett annat hushåll.")
+            payload = schemas.LoanUpdate(**proposed)
+            for field, value in payload.dict(exclude_unset=True, exclude_none=True).items():
+                setattr(entity, field, value)
+        else:
+            payload = schema_class(**proposed)
+            entity = model_class(**payload.dict())
+            db.add(entity)
+            db.flush()
+        draft.status = "approved"
+        draft.canonical_target_entity_type = normalized
+        draft.canonical_target_entity_id = entity.id
+        draft.review_error = None
+        draft.applied_at = datetime.utcnow()
+        if normalized == "loan":
+            entity.statement_doc_id = document.id
+        _update_document_workflow_status(document)
+        db.commit()
+        return {
+            "draft_id": draft.id,
+            "target_entity_type": normalized,
+            "target_entity_id": entity.id,
+            "status": draft.status,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        draft.status = "apply_failed"
+        draft.review_error = str(exc)
+        document.extraction_status = "failed"
+        document.processing_error = str(exc)
+        db.commit()
+        raise HTTPException(status_code=400, detail=f"Draft kunde inte appliceras: {exc}") from exc
 
 
 @app.delete("/extraction_drafts/{draft_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_extraction_draft(draft_id: int, db: Session = Depends(get_db)):
     db_draft = get_object_or_404(db, models.ExtractionDraft, draft_id)
+    document = get_object_or_404(db, models.Document, db_draft.document_id)
     db.delete(db_draft)
+    db.flush()
+    _update_document_workflow_status(document)
     db.commit()
     return
 
