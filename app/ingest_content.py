@@ -54,6 +54,62 @@ class OCRExtractor(Protocol):
         ...
 
 
+class TesseractOCRExtractor:
+    """Real OCR extractor using Tesseract with Swedish + English language support."""
+
+    name = "tesseract"
+
+    def extract_text(self, raw: bytes, *, file_name: str | None = None, mime_type: str | None = None) -> ExtractedText:
+        try:
+            from PIL import Image
+            import pytesseract
+        except ImportError:
+            return ExtractedText(
+                text=None,
+                extraction_mode="ocr_missing_dependency",
+                notes=["OCR kräver pytesseract och Pillow. Installera med: pip install pytesseract Pillow"],
+            )
+
+        try:
+            image = Image.open(io.BytesIO(raw))
+        except Exception as exc:
+            return ExtractedText(
+                text=None,
+                extraction_mode="ocr_image_unreadable",
+                notes=[f"Bilden kunde inte öppnas: {exc}"],
+            )
+
+        try:
+            ocr_text = pytesseract.image_to_string(image, lang="swe+eng", config="--psm 6")
+        except pytesseract.TesseractNotFoundError:
+            return ExtractedText(
+                text=None,
+                extraction_mode="ocr_tesseract_missing",
+                notes=["Tesseract är inte installerat på servern. Installera med: apt install tesseract-ocr tesseract-ocr-swe"],
+            )
+        except Exception as exc:
+            return ExtractedText(
+                text=None,
+                extraction_mode="ocr_failed",
+                notes=[f"OCR misslyckades: {exc}"],
+            )
+
+        normalized = normalize_ingest_text(ocr_text) if ocr_text else None
+        if not normalized:
+            return ExtractedText(
+                text=None,
+                extraction_mode="ocr_no_text",
+                notes=["OCR hittade ingen läsbar text i bilden."],
+            )
+
+        confidence_note = "Text extraherades via Tesseract OCR (swe+eng). OCR-text kan innehålla felläsningar."
+        return ExtractedText(
+            text=normalized,
+            extraction_mode="ocr_tesseract",
+            notes=[confidence_note],
+        )
+
+
 class NotImplementedOCRExtractor:
     name = "ocr_not_implemented"
 
@@ -65,6 +121,9 @@ class NotImplementedOCRExtractor:
                 "Bild- och screenshot-OCR är bara förberedd som ett separat extractor-kontrakt. Den är inte implementerad ännu.",
             ],
         )
+
+
+_default_ocr_extractor = TesseractOCRExtractor()
 
 
 def normalize_ingest_text(text: str) -> str:
@@ -109,7 +168,7 @@ def _looks_textual(raw: bytes) -> bool:
     return printable / max(len(sample), 1) >= 0.85
 
 
-def _extract_pdf_text(raw: bytes) -> ExtractedText:
+def _extract_pdf_text(raw: bytes, *, ocr_extractor: OCRExtractor | None = None) -> ExtractedText:
     try:
         reader = PdfReader(io.BytesIO(raw))
     except Exception as exc:  # pragma: no cover - exercised by runtime integration
@@ -125,18 +184,68 @@ def _extract_pdf_text(raw: bytes) -> ExtractedText:
         if page_text.strip():
             extracted_pages.append(page_text)
 
-    if not extracted_pages:
+    if extracted_pages:
+        normalized = normalize_ingest_text("\n\n".join(extracted_pages))
+        if normalized:
+            return ExtractedText(
+                text=normalized,
+                extraction_mode="pdf_text",
+                notes=["Text extraherades från PDF utan OCR."],
+            )
+
+    extractor = ocr_extractor or _default_ocr_extractor
+    return _extract_pdf_ocr(raw, reader, extractor)
+
+
+def _extract_pdf_ocr(raw: bytes, reader: PdfReader, extractor: OCRExtractor) -> ExtractedText:
+    """Try OCR on a scanned PDF by rendering pages to images."""
+    try:
+        from PIL import Image
+        import pytesseract
+    except ImportError:
+        return ExtractedText(
+            text=None,
+            extraction_mode="pdf_ocr_missing_dependency",
+            notes=["PDF:en verkar vara skannad men OCR-beroenden saknas (pytesseract, Pillow)."],
+        )
+
+    ocr_pages: list[str] = []
+    notes: list[str] = []
+
+    for page_idx, page in enumerate(reader.pages[:10]):
+        images_on_page = []
+        try:
+            if hasattr(page, "images") and page.images:
+                for img in page.images:
+                    try:
+                        image = Image.open(io.BytesIO(img.data))
+                        images_on_page.append(image)
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+
+        for image in images_on_page:
+            try:
+                page_text = pytesseract.image_to_string(image, lang="swe+eng", config="--psm 6")
+                normalized = normalize_ingest_text(page_text) if page_text else ""
+                if normalized:
+                    ocr_pages.append(normalized)
+            except Exception as exc:
+                notes.append(f"OCR misslyckades för bild på sida {page_idx + 1}: {exc}")
+
+    if not ocr_pages:
         return ExtractedText(
             text=None,
             extraction_mode="pdf_no_text",
-            notes=["PDF:en innehöll ingen extraherbar text."],
+            notes=["PDF:en innehöll ingen extraherbar text, varken via textlager eller OCR."] + notes,
         )
 
-    normalized = normalize_ingest_text("\n\n".join(extracted_pages))
+    combined = normalize_ingest_text("\n\n".join(ocr_pages))
     return ExtractedText(
-        text=normalized or None,
-        extraction_mode="pdf_text",
-        notes=["Text extraherades från PDF utan OCR."],
+        text=combined or None,
+        extraction_mode="pdf_ocr",
+        notes=["Text extraherades från skannad PDF via OCR (Tesseract swe+eng). Resultat kan innehålla felläsningar."] + notes,
     )
 
 
@@ -151,11 +260,11 @@ def extract_text_from_upload(
     mime = (mime_type or "").lower()
 
     if suffix in IMAGE_EXTENSIONS or mime.startswith(IMAGE_MIME_PREFIXES):
-        extractor = ocr_extractor or NotImplementedOCRExtractor()
+        extractor = ocr_extractor or _default_ocr_extractor
         return extractor.extract_text(raw, file_name=file_name, mime_type=mime_type)
 
     if suffix in PDF_EXTENSIONS or mime == "application/pdf":
-        return _extract_pdf_text(raw)
+        return _extract_pdf_text(raw, ocr_extractor=ocr_extractor)
 
     if suffix in TEXT_EXTENSIONS or mime.startswith(TEXT_MIME_PREFIXES) or mime in TEXT_MIME_TYPES:
         text = raw.decode("utf-8", errors="replace")

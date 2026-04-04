@@ -771,7 +771,7 @@ class AssistantPromptResponse(BaseModel):
 
 class IngestSuggestionRead(BaseModel):
     target_entity_type: Literal["recurring_cost", "subscription_contract", "loan", "income_source"]
-    review_bucket: Literal["recurring_cost", "subscription_contract", "loan", "income_source", "unclear"] = "unclear"
+    review_bucket: Literal["recurring_cost", "subscription_contract", "loan", "income_source", "transfer_or_saving", "unclear"] = "unclear"
     title: str
     rationale: str
     confidence: Optional[confloat(ge=0.0, le=1.0)] = None
@@ -781,15 +781,15 @@ class IngestSuggestionRead(BaseModel):
     uncertainty_notes: List[str] = Field(default_factory=list)
 
 
-class IngestFutureImageReadinessRead(BaseModel):
-    supported: bool = False
-    status: Literal["not_implemented", "planned"] = "not_implemented"
-    note: str = "Bild- och screenshotavläsning är inte implementerad ännu."
+class IngestImageReadinessRead(BaseModel):
+    supported: bool = True
+    status: Literal["implemented", "not_implemented"] = "implemented"
+    note: str = "OCR via Tesseract (swe+eng) för bilder och skannande PDF:er."
 
 
 class IngestInputRead(BaseModel):
-    source_channel: Literal["text", "pdf_text", "uploaded_document", "uploaded_pdf", "image_placeholder"]
-    input_origin: Literal["user_paste", "document_text", "file_text", "pdf_text", "future_image_placeholder"]
+    source_channel: Literal["text", "pdf_text", "uploaded_document", "uploaded_pdf", "image", "bank_paste"]
+    input_origin: Literal["user_paste", "document_text", "file_text", "pdf_text", "ocr_image", "ocr_pdf", "bank_paste"]
     document_id: Optional[int] = None
     document_file_name: Optional[str] = None
     source_name: Optional[str] = None
@@ -800,7 +800,7 @@ class IngestInputRead(BaseModel):
 
 
 class IngestDocumentSummaryRead(BaseModel):
-    document_type: Literal["subscription_contract", "invoice", "recurring_cost_candidate", "financial_note", "unclear"]
+    document_type: Literal["subscription_contract", "invoice", "recurring_cost_candidate", "transfer_or_saving_candidate", "bank_row_batch", "financial_note", "unclear"]
     provider_name: Optional[str] = None
     label: Optional[str] = None
     amount: Optional[float] = None
@@ -817,7 +817,7 @@ class IngestDocumentSummaryRead(BaseModel):
 
 
 class IngestReviewGroupRead(BaseModel):
-    group_type: Literal["subscription_contract", "recurring_cost", "loan", "income_source", "unclear"]
+    group_type: Literal["subscription_contract", "recurring_cost", "loan", "income_source", "transfer_or_saving", "unclear"]
     title: str
     summary: str
     confidence: Optional[confloat(ge=0.0, le=1.0)] = None
@@ -829,7 +829,7 @@ class IngestReviewGroupRead(BaseModel):
 class IngestAnalyzeRequest(BaseModel):
     input_text: Optional[str] = None
     input_kind: Optional[str] = Field(default="unknown")
-    source_channel: Literal["text", "pdf_text", "uploaded_document", "uploaded_pdf", "image_placeholder"] = "text"
+    source_channel: Literal["text", "pdf_text", "uploaded_document", "uploaded_pdf", "image", "bank_paste"] = "text"
     document_id: Optional[int] = None
     source_name: Optional[str] = None
 
@@ -846,7 +846,7 @@ class IngestAnalyzeResponse(BaseModel):
     household_id: int
     source_name: Optional[str] = None
     input_kind: str
-    source_channel: Literal["text", "pdf_text", "uploaded_document", "uploaded_pdf", "image_placeholder"] = "text"
+    source_channel: Literal["text", "pdf_text", "uploaded_document", "uploaded_pdf", "image", "bank_paste"] = "text"
     document_id: Optional[int] = None
     input_details: IngestInputRead
     detected_kind: str
@@ -855,7 +855,7 @@ class IngestAnalyzeResponse(BaseModel):
     summary: str
     guidance: List[str] = Field(default_factory=list)
     suggestions: List[IngestSuggestionRead] = Field(default_factory=list)
-    future_image_readiness: IngestFutureImageReadinessRead = Field(default_factory=IngestFutureImageReadinessRead)
+    image_readiness: IngestImageReadinessRead = Field(default_factory=IngestImageReadinessRead)
     provider: str
     model: str
     usage: Optional[AIUsageRead] = None
@@ -864,7 +864,7 @@ class IngestAnalyzeResponse(BaseModel):
 class IngestPromoteRequest(BaseModel):
     input_text: Optional[str] = None
     input_kind: Optional[str] = Field(default="unknown")
-    source_channel: Literal["text", "pdf_text", "uploaded_document", "uploaded_pdf", "image_placeholder"] = "text"
+    source_channel: Literal["text", "pdf_text", "uploaded_document", "uploaded_pdf", "image", "bank_paste"] = "text"
     document_id: Optional[int] = None
     source_name: Optional[str] = None
     provider: Optional[str] = None

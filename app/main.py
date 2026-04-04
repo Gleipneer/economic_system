@@ -687,16 +687,20 @@ def upload_document(
     if extracted_payload is None:
         auto_extracted = extract_text_from_upload(raw, file_name=file.filename, mime_type=file.content_type)
         extracted_payload = auto_extracted.text
-        extraction_status = (
-            "parsed"
-            if extracted_payload
-            else {
+        if extracted_payload:
+            extraction_status = "ocr_parsed" if auto_extracted.extraction_mode.startswith("ocr") else "parsed"
+        else:
+            extraction_status = {
                 "ocr_not_implemented": "ocr_pending",
+                "ocr_image_unreadable": "parse_failed",
+                "ocr_tesseract_missing": "ocr_pending",
+                "ocr_failed": "parse_failed",
+                "ocr_no_text": "parse_failed",
+                "ocr_missing_dependency": "ocr_pending",
                 "unsupported_binary": "unsupported",
                 "pdf_unreadable": "parse_failed",
                 "pdf_no_text": "parse_failed",
             }.get(auto_extracted.extraction_mode, "pending")
-        )
     document = models.Document(
         household_id=household_id,
         document_type=document_type,

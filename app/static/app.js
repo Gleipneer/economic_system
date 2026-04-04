@@ -3041,7 +3041,8 @@ function ingestKindOptions() {
   return [
     ["text", "Klistrad text (faktura, avtal, kvitto)"],
     ["pdf_text", "Klistrad text från PDF"],
-    ["image_placeholder", "Bild eller screenshot (förberett, ej klart)"],
+    ["bank_paste", "Bankrader / kontoutdrag (LF-format)"],
+    ["image", "Bild eller screenshot (OCR)"],
   ];
 }
 
@@ -3050,6 +3051,8 @@ function classificationLabel(docType) {
     subscription_contract: "Abonnemang / avtal",
     invoice: "Faktura",
     recurring_cost_candidate: "Återkommande kostnad",
+    transfer_or_saving_candidate: "Överföring / sparande",
+    bank_row_batch: "Bankrader / kontoutdrag",
     financial_note: "Finansiell anteckning",
     unclear: "Oklart underlag",
   }[docType] || docType || "Oklart";
@@ -3060,6 +3063,8 @@ function classificationBadgeTone(docType) {
     subscription_contract: "info",
     invoice: "success",
     recurring_cost_candidate: "info",
+    transfer_or_saving_candidate: "info",
+    bank_row_batch: "info",
     financial_note: "muted",
     unclear: "warning",
   }[docType] || "muted";
@@ -3146,7 +3151,7 @@ function normalizeIngestResult(result) {
     model: result?.model || null,
     provider: result?.provider || null,
     usage: result?.usage || null,
-    futureImageReadiness: result?.future_image_readiness || null,
+    imageReadiness: result?.image_readiness || null,
   };
 }
 
@@ -3210,18 +3215,17 @@ function renderIngestPipelineStrip() {
   `;
 }
 
-function renderIngestFutureImagePlaceholder() {
+function renderIngestImageReadiness() {
   return `
     <article class="workflow-callout future-readiness">
       <div class="record-title-row">
         <div>
-          <h4 class="record-title">Bild- och screenshot-avläsning</h4>
-          <p class="muted">Kontraktet finns här, men OCR/screenshot-tolkning är inte implementerad eller verifierad ännu.</p>
+          <h4 class="record-title">Bild- och screenshot-avläsning (OCR)</h4>
+          <p class="muted">Tesseract OCR (svenska + engelska) stöds för bilder, screenshots och skannade PDF:er.</p>
         </div>
-        <span class="badge muted">Ej klar</span>
+        <span class="badge success">Implementerad</span>
       </div>
-      <p class="muted">När den delen byggs ska den kopplas hit som en separat extractor. Tills dess är den här ytan bara en tydlig plats i flödet.</p>
-      <button class="ghost compact" type="button" disabled>Kommer senare</button>
+      <p class="muted">Ladda upp en bild eller skannad PDF via uppladdningsformuläret. Text extraheras via OCR innan AI-analys. Observera att OCR-text kan innehålla felläsningar.</p>
     </article>
   `;
 }
@@ -3272,13 +3276,15 @@ function ingestSourceChannelLabel(value) {
     pdf_text: "Klistrad PDF-text",
     uploaded_document: "Uppladdat dokument",
     uploaded_pdf: "Uppladdad PDF",
-    image_placeholder: "Bild eller screenshot",
+    image: "Bild / screenshot (OCR)",
+    bank_paste: "Bankrader / kontoutdrag",
   }[value] || "Okänd källa";
 }
 
 function documentExtractionMeta(status) {
   return {
     parsed: { tone: "success", label: "Text extraherad" },
+    ocr_parsed: { tone: "success", label: "OCR-text extraherad" },
     ocr_pending: { tone: "warning", label: "OCR krävs" },
     parse_failed: { tone: "warning", label: "Text kunde inte läsas" },
     unsupported: { tone: "warning", label: "Filtypen stöds inte" },
@@ -3471,7 +3477,7 @@ function renderDocumentsPageV2() {
           <div class="upload-box">
             ${renderDocumentUploadForm()}
           </div>
-          ${renderIngestFutureImagePlaceholder()}
+          ${renderIngestImageReadiness()}
         </article>
         <article class="panel form-card">
           <span class="section-eyebrow">AI-review</span>
