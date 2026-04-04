@@ -109,8 +109,10 @@ underlag
 ## FAS 2 — Smartare normalisering (SNART)
 
 ### 2.1 Merchant-normalisering
-- [ ] Identifiera att NETFLIX.COM, Netflix, NETFLIX Amsterdam = samma aktör
-- [ ] Normalisera leverantörsnamn vid review
+- [x] MerchantAlias-modell (alias → canonical_name, category_hint)
+- [x] API: list/create/delete per hushåll
+- [x] Normalisering appliceras på ingest-text innan AI-analys
+- [ ] Frontend: hantera aliases i UI (lista, skapa, ta bort)
 
 ### 2.2 Dubblettkontroll
 - [ ] Detektera om samma faktura kom in via PDF och screenshot

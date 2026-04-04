@@ -57,6 +57,10 @@ These non-CRUD flows are implemented:
 - `POST /households/{id}/ingest_ai/promote`
 - `POST /documents/upload`
 - `GET /documents/{id}/download`
+- `GET /households/{id}/export/bank_pdf`
+- `GET /households/{id}/merchant_aliases`
+- `POST /households/{id}/merchant_aliases`
+- `DELETE /households/{id}/merchant_aliases/{alias_id}`
 
 ### What Those Flows Actually Do
 
@@ -69,6 +73,8 @@ These non-CRUD flows are implemented:
 - `assistant/respond` builds a compact household read model and calls OpenAI Responses API when provider config exists
 - `ingest_ai/analyze` classifies raw text, returns validated structured suggestions, and does not write canonical data
 - `ingest_ai/promote` stores the raw input as a `Document` row plus `ExtractionDraft` rows only after explicit user action
+- `export/bank_pdf` generates a professional Swedish PDF with household finances using reportlab (deterministic math only, no AI)
+- `merchant_aliases` CRUD manages per-household merchant name normalization rules applied during ingest
 
 ## What Exists in the Frontend
 
@@ -191,15 +197,30 @@ Screenshot/image OCR:
 - OCR text includes confidence notes and can contain reading errors
 - system dependency: `tesseract-ocr`, `tesseract-ocr-swe`; Python: `pytesseract`, `Pillow`
 
-Document classification types:
+Document classification types (9):
 
 - `subscription_contract`: abonnemang, avtal
 - `invoice`: faktura
 - `recurring_cost_candidate`: trolig återkommande kostnad
 - `transfer_or_saving_candidate`: trolig överföring/sparande
 - `bank_row_batch`: LF-style kontoutdrag med flera rader
+- `insurance_policy`: försäkring
+- `loan_or_credit`: lån/kredit
 - `financial_note`: generell finansiell anteckning
 - `unclear`: oklart underlag
+
+Normalization:
+
+- `MerchantAlias` table stores per-household alias → canonical name mappings
+- Aliases are applied to ingest text before AI classification
+- API: `GET/POST/DELETE /households/{id}/merchant_aliases`
+
+Bank-ready PDF Export:
+
+- `GET /households/{id}/export/bank_pdf` generates professional A4 PDF via reportlab
+- Covers: persons, incomes, costs, subscriptions, insurance, loans, housing scenario, assets, cashflow
+- Uses deterministic calculations only — no AI, no fake data
+- Source notes indicate data completeness and pending review drafts
 
 ## What Does Not Exist
 
