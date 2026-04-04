@@ -41,13 +41,13 @@ A first-class "Exportera bankkalkyl" button that generates a premium PDF suitabl
 - Frontend: button on reports page or overview
 
 ### Status
-- [ ] Install PDF library (reportlab)
-- [ ] Create `app/pdf_export.py` module
-- [ ] Implement `GET /households/{id}/export/bank_pdf`
-- [ ] Professional layout with Swedish typography
-- [ ] Frontend button wired
-- [ ] Runtime verified: PDF opens, content matches data
-- [ ] Test added
+- [x] Install PDF library (reportlab==4.4.0)
+- [x] Create `app/pdf_export.py` module
+- [x] Implement `GET /households/{id}/export/bank_pdf`
+- [x] Professional layout with Swedish typography
+- [x] Frontend button on reports page
+- [x] Runtime verified: PDF opens, 2 pages, content matches data
+- [x] Test added (test_bank_pdf_export_generates_valid_pdf)
 
 ---
 
