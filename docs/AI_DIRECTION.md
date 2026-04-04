@@ -117,6 +117,32 @@ Observed token shape during validation:
 - analysis prompts: about `969-996` total tokens
 - ingest prompts: about `860-1006` total tokens
 
+## Data-In Improvements (2026-04-03 second pass)
+
+Changes made to improve Data-In for invoices, subscriptions, and PDF-paste:
+
+- The AI prompt now gives explicit classification rules for invoices and subscriptions
+- Input text is pre-analyzed for structural hints (invoice keywords, subscription keywords, Swedish amounts, dates, monthly cost patterns)
+- Text normalization handles PDF-paste artifacts: NBSP, zero-width spaces, form feeds
+- The frontend now shows document classification with color-coded badges, confidence percentages, and separated confirmed vs uncertain fields
+- Screenshot/image OCR remains explicitly not implemented; the `OCRExtractor` protocol and `image_placeholder` rejection are in place as the prepared interface
+
+Live OpenAI verification on 2026-04-04 used `gpt-5.4-mini-2026-03-17`:
+
+- LF bank paste (6 rows): classified as `bank_row_batch`, confidence 0.98, 6 suggestions across 4 review groups, 2455 tokens
+- Screenshot/image OCR (generated Telia invoice): OCR extracted text, AI classified as `invoice`, confidence 0.9, OCR errors noted in uncertainty, 1879 tokens
+- Subscription text (Netflix): classified as `subscription_contract`, confidence 0.97, 1651 tokens
+- Messy uncertain text: classified as `financial_note`, confidence 0.34, clear uncertainty reasons
+- Full promote flow: bank paste promoted to workflow draft, verified zero canonical writes (0 subscriptions, 0 recurring_costs after promote)
+- Assistant analysis: still works, 684 tokens
+
+Previous verification (2026-04-03):
+
+- Subscription text (Telia bredband): `subscription_contract`, confidence 0.98, 1661 tokens
+- Invoice text (Stockholms Stad avfall): `invoice`, confidence 0.98, quarterly→yearly conversion, 1843 tokens
+- PDF-pasted text with NBSP (Halebop): `invoice`, confidence 0.96, two valid suggestions, 1899 tokens
+- Messy uncertain text (Försäkringskassan): `financial_note`, confidence 0.63, 1844 tokens
+
 ## If an OpenAI Gateway Is Added Later
 
 That would belong as a future integration layer, likely behind a backend service boundary.

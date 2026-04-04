@@ -3039,10 +3039,55 @@ function renderHousingPageV2() {
 
 function ingestKindOptions() {
   return [
-    ["text", "Klistrad text"],
+    ["text", "Klistrad text (faktura, avtal, kvitto)"],
     ["pdf_text", "Klistrad text från PDF"],
-    ["image_placeholder", "Bild eller screenshot (förberett, ej klart)"],
+    ["bank_paste", "Bankrader / kontoutdrag (LF-format)"],
+    ["image", "Bild eller screenshot (OCR)"],
   ];
+}
+
+function classificationLabel(docType) {
+  return {
+    subscription_contract: "Abonnemang / avtal",
+    invoice: "Faktura",
+    recurring_cost_candidate: "Återkommande kostnad",
+    transfer_or_saving_candidate: "Överföring / sparande",
+    bank_row_batch: "Bankrader / kontoutdrag",
+    insurance_policy: "Försäkring",
+    loan_or_credit: "Lån / kredit",
+    financial_note: "Finansiell anteckning",
+    unclear: "Oklart underlag",
+  }[docType] || docType || "Oklart";
+}
+
+function classificationBadgeTone(docType) {
+  return {
+    subscription_contract: "info",
+    invoice: "success",
+    recurring_cost_candidate: "info",
+    transfer_or_saving_candidate: "info",
+    bank_row_batch: "info",
+    insurance_policy: "info",
+    loan_or_credit: "info",
+    financial_note: "muted",
+    unclear: "warning",
+  }[docType] || "muted";
+}
+
+function confidenceBadge(confidence) {
+  if (confidence == null) return `<span class="badge muted">Confidence ej angiven</span>`;
+  const pct = Math.round(confidence * 100);
+  if (pct >= 80) return `<span class="badge success">Confidence ${pct} %</span>`;
+  if (pct >= 50) return `<span class="badge info">Confidence ${pct} %</span>`;
+  return `<span class="badge warning">Confidence ${pct} %</span>`;
+}
+
+function relevanceBadge(relevance) {
+  return {
+    high: `<span class="badge success">Hög relevans</span>`,
+    medium: `<span class="badge info">Medel relevans</span>`,
+    low: `<span class="badge muted">Låg relevans</span>`,
+  }[relevance] || `<span class="badge muted">${escapeHtml(relevance || "Okänd")}</span>`;
 }
 
 function normalizeIngestResult(result) {
@@ -3110,7 +3155,7 @@ function normalizeIngestResult(result) {
     model: result?.model || null,
     provider: result?.provider || null,
     usage: result?.usage || null,
-    futureImageReadiness: result?.future_image_readiness || null,
+    imageReadiness: result?.image_readiness || null,
   };
 }
 
@@ -3151,41 +3196,40 @@ function renderIngestPipelineStrip() {
   return `
     <section class="record-grid four workflow-pipeline">
       <article class="workflow-step-card">
-        <span class="badge info">1. Rå input</span>
-        <h4>Klistra in text eller ladda upp underlag</h4>
-        <p class="muted">Text, PDF-text eller uppladdade dokument ska kunna bli ingång till samma reviewflöde.</p>
+        <span class="badge info">1. Input</span>
+        <h4>Text, PDF, bild, bank-paste</h4>
+        <p class="muted">Klistra text, ladda upp PDF/bild (OCR), eller klistra bankrader från LF-format.</p>
       </article>
       <article class="workflow-step-card">
         <span class="badge info">2. Extraktion</span>
-        <h4>Text normaliseras innan AI</h4>
-        <p class="muted">När text går att extrahera ska den synas som workflow-data, inte som kanonisk sanning.</p>
+        <h4>Text/OCR → normalisering</h4>
+        <p class="muted">PDF-text, Tesseract OCR eller ren text normaliseras. OCR-text kan ha felläsningar.</p>
       </article>
       <article class="workflow-step-card">
-        <span class="badge info">3. AI-review</span>
-        <h4>Klassificera och markera osäkerhet</h4>
-        <p class="muted">Modellen ska visa vad som är säkert, vad som är tveksamt och vart underlaget pekar.</p>
+        <span class="badge info">3. AI-klassificering</span>
+        <h4>Typ, fakta, osäkerhet</h4>
+        <p class="muted">AI klassificerar underlag och extraherar kärnfakta. Osäkerhet markeras tydligt.</p>
       </article>
       <article class="workflow-step-card">
-        <span class="badge info">4. Promote</span>
-        <h4>Skapa reviewutkast explicit</h4>
-        <p class="muted">Promote är ett separat steg. Det får inte skriva tyst till hushållets kanoniska data.</p>
+        <span class="badge info">4. Review → Apply</span>
+        <h4>Granska → Godkänn</h4>
+        <p class="muted">Promote skapar reviewutkast. Apply skriver till kanonisk data separat och explicit.</p>
       </article>
     </section>
   `;
 }
 
-function renderIngestFutureImagePlaceholder() {
+function renderIngestImageReadiness() {
   return `
     <article class="workflow-callout future-readiness">
       <div class="record-title-row">
         <div>
-          <h4 class="record-title">Bild- och screenshot-avläsning</h4>
-          <p class="muted">Kontraktet finns här, men OCR/screenshot-tolkning är inte implementerad eller verifierad ännu.</p>
+          <h4 class="record-title">Bild- och screenshot-avläsning (OCR)</h4>
+          <p class="muted">Tesseract OCR (svenska + engelska) stöds för bilder, screenshots och skannade PDF:er.</p>
         </div>
-        <span class="badge muted">Ej klar</span>
+        <span class="badge success">Implementerad</span>
       </div>
-      <p class="muted">När den delen byggs ska den kopplas hit som en separat extractor. Tills dess är den här ytan bara en tydlig plats i flödet.</p>
-      <button class="ghost compact" type="button" disabled>Kommer senare</button>
+      <p class="muted">Ladda upp en bild eller skannad PDF via uppladdningsformuläret. Text extraheras via OCR innan AI-analys. Observera att OCR-text kan innehålla felläsningar.</p>
     </article>
   `;
 }
@@ -3236,13 +3280,15 @@ function ingestSourceChannelLabel(value) {
     pdf_text: "Klistrad PDF-text",
     uploaded_document: "Uppladdat dokument",
     uploaded_pdf: "Uppladdad PDF",
-    image_placeholder: "Bild eller screenshot",
+    image: "Bild / screenshot (OCR)",
+    bank_paste: "Bankrader / kontoutdrag",
   }[value] || "Okänd källa";
 }
 
 function documentExtractionMeta(status) {
   return {
     parsed: { tone: "success", label: "Text extraherad" },
+    ocr_parsed: { tone: "success", label: "OCR-text extraherad" },
     ocr_pending: { tone: "warning", label: "OCR krävs" },
     parse_failed: { tone: "warning", label: "Text kunde inte läsas" },
     unsupported: { tone: "warning", label: "Filtypen stöds inte" },
@@ -3312,21 +3358,21 @@ function renderIngestResult() {
   const rawPreviewText = rawPreview.length > 1200 ? `${rawPreview.slice(0, 1200)}...` : rawPreview;
   return `
     <div class="workflow-stack">
-      <article class="record-card">
+      <article class="record-card ingest-classification-card">
         <div class="record-title-row">
           <div>
+            <span class="badge ${classificationBadgeTone(review.documentType)}">${escapeHtml(classificationLabel(review.documentType))}</span>
             <h4 class="record-title">${escapeHtml(review.summary)}</h4>
-            <p class="muted">${escapeHtml(review.documentType)} · ${escapeHtml(ingestSourceChannelLabel(review.inputKind))}${review.provider ? ` · ${escapeHtml(review.provider)}` : ""}${review.model ? ` · ${escapeHtml(review.model)}` : ""}</p>
+            <p class="muted">${escapeHtml(ingestSourceChannelLabel(review.inputKind))}${review.provider ? ` · ${escapeHtml(review.provider)}` : ""}${review.model ? ` · ${escapeHtml(review.model)}` : ""}</p>
           </div>
-          <span class="badge">${review.usage?.total_tokens ? `${review.usage.total_tokens} tokens` : "utan usage"}</span>
+          <span class="badge muted">${review.usage?.total_tokens ? `${review.usage.total_tokens} tokens` : "utan usage"}</span>
         </div>
         <div class="badge-row">
-          <span class="badge info">Klass: ${escapeHtml(review.documentType)}</span>
+          ${confidenceBadge(review.confidence)}
+          ${relevanceBadge(review.householdRelevance)}
           <span class="badge muted">Riktning: ${escapeHtml(review.recommendation)}</span>
-          <span class="badge ${review.confidence == null ? "muted" : "success"}">Confidence ${review.confidence == null ? "ej angiven" : escapeHtml(number(review.confidence, 2))}</span>
         </div>
-        <p class="muted">${escapeHtml(review.summary)}</p>
-        ${review.guidance?.length ? `<p class="muted">${escapeHtml(review.guidance.join(" · "))}</p>` : ""}
+        ${review.guidance?.length ? `<div class="ingest-guidance"><ul class="summary-list">${review.guidance.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul></div>` : ""}
         <div class="workflow-callout">
           <strong>AI-tolkningen är inte kanonisk data.</strong>
           <p class="muted">Promote skapar bara dokument- och reviewutkast. Inget skrivs tyst till hushållets slutgiltiga poster.</p>
@@ -3335,69 +3381,37 @@ function renderIngestResult() {
       <article class="record-card">
         <div class="record-title-row">
           <div>
-            <h4 class="record-title">Rå input</h4>
-            <p class="muted">Det här är källtexten eller dokumenttexten som AI:n fick jobba med.</p>
-          </div>
-          <span class="badge muted">${escapeHtml(ingestSourceChannelLabel(review.inputKind))}</span>
-        </div>
-        <div class="detail-grid three fact-grid">
-          ${detailCell("Källa", review.rawSource || "Ej angiven")}
-          ${detailCell("Dokument", review.documentId ? `#${review.documentId}` : "Ingen")}
-          ${detailCell("Textlängd", review.inputDetails?.text_length ? `${review.inputDetails.text_length} tecken` : "Ej angiven")}
-          ${detailCell("Extraktion", review.inputDetails?.extraction_mode || "manuell")}
-          ${detailCell("Fil", review.inputDetails?.document_file_name || "Ingen fil")}
-          ${detailCell("Trunkerad", review.inputDetails?.text_truncated ? "Ja" : "Nej")}
-        </div>
-        ${review.inputDetails?.extraction_notes?.length ? `<p class="muted">${escapeHtml(review.inputDetails.extraction_notes.join(" · "))}</p>` : ""}
-        ${rawPreviewText ? `<pre class="raw-preview">${escapeHtml(rawPreviewText)}</pre>` : `<div class="empty-state compact"><p>Ingen råtext finns i vyn just nu.</p></div>`}
-      </article>
-      <article class="record-card">
-        <div class="record-title-row">
-          <div>
-            <h4 class="record-title">Document summary</h4>
-            <p class="muted">Säkra kärnfält visas separat från osäkra.</p>
+            <h4 class="record-title">Extraherade kärnfakta</h4>
+            <p class="muted">Säkra fält (bekräftade i texten) visas med grön markering, osäkra med gul.</p>
           </div>
         </div>
+        ${renderIngestFactGrid(review)}
         <div class="summary-panels">
-          <article class="workflow-callout subtle">
-            <strong>Säkra kärnfält</strong>
-            ${renderIngestSummaryBlock(review.safeFields || {
-              provider_name: review.providerName,
-              title: review.title,
-              amount: review.amount,
-              currency: review.currency,
-              due_date: review.dueDate,
-              cadence: review.cadence,
-              household_relevance: review.householdRelevance,
-              notes: review.notes,
-            }, "Inga säkra kärnfält gick att extrahera.")}
+          <article class="workflow-callout subtle safe-fields">
+            <strong>✓ Bekräftade fält</strong>
+            ${renderIngestSummaryBlock(review.safeFields, "Inga fält kunde bekräftas direkt ur texten.")}
           </article>
-          <article class="workflow-callout subtle">
-            <strong>Osäkra kärnfält</strong>
-            ${renderIngestSummaryBlock(review.uncertainFields || review.uncertaintyReasons, "Inga osäkra kärnfält angavs.")}
+          <article class="workflow-callout subtle uncertain-fields">
+            <strong>? Osäkra fält</strong>
+            ${renderIngestSummaryBlock(review.uncertainFields, "Inga osäkra fält.")}
           </article>
         </div>
       </article>
+      ${review.uncertaintyReasons?.length ? `
       <article class="record-card">
         <div class="record-title-row">
           <div>
-            <h4 class="record-title">Osäkerhet</h4>
-            <p class="muted">Det som modellen inte vet säkert ska synas tydligt.</p>
+            <h4 class="record-title">⚠ Osäkerhet och varningar</h4>
+            <p class="muted">Modellen flaggar dessa punkter som osäkra. Granska innan du skapar utkast.</p>
           </div>
         </div>
-        ${review.uncertaintyReasons?.length ? `<ul class="summary-list">${review.uncertaintyReasons.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>` : `<div class="empty-state compact"><p>Ingen osäkerhet angavs, men granska ändå innan promote.</p></div>`}
-        <div class="actions-row">
-          <button class="primary" type="button" data-action="promote-ingest" ${validSuggestions.length ? "" : "disabled"}>
-            ${state.ui.ingestPromoting ? "Skapar utkast..." : "Skapa reviewutkast"}
-          </button>
-          <span class="chat-disclaimer">Detta skapar bara reviewutkast i workflow-lagret. Inget skrivs direkt till kanonisk ekonomi.</span>
-        </div>
-      </article>
+        <ul class="summary-list uncertainty-list">${review.uncertaintyReasons.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>
+      </article>` : ""}
       <article class="record-card">
         <div class="record-title-row">
           <div>
             <h4 class="record-title">Reviewförslag</h4>
-            <p class="muted">Validerade förslag som kan promota vidare till workflow-utkast. Grupperade efter review_bucket när det finns.</p>
+            <p class="muted">Validerade förslag grupperade efter typ.</p>
           </div>
           <span class="badge">${validSuggestions.length} validerade</span>
         </div>
@@ -3406,7 +3420,7 @@ function renderIngestResult() {
             <div class="record-title-row">
               <div>
                 <h5 class="group-title">${escapeHtml(group.title || group.bucket)}</h5>
-                <p class="muted">${escapeHtml(group.summary || "")}${group.summary ? " · " : ""}${group.items.length} förslag</p>
+                <p class="muted">${group.items.length} förslag</p>
               </div>
               <span class="badge muted">${group.items.filter((item) => item.validation_status === "valid").length} validerade</span>
             </div>
@@ -3414,8 +3428,25 @@ function renderIngestResult() {
               ${group.items.map((item) => renderIngestSuggestionCard(item)).join("")}
             </div>
           </section>
-        `).join("") : `<div class="empty-state compact"><p>Inga säkra strukturerade förslag hittades i underlaget.</p></div>`}
+        `).join("") : `<div class="empty-state compact"><p>Inga strukturerade förslag hittades.</p></div>`}
+        <div class="actions-row" style="margin-top:var(--space-m)">
+          <button class="primary" type="button" data-action="promote-ingest" ${validSuggestions.length ? "" : "disabled"}>
+            ${state.ui.ingestPromoting ? "Skapar utkast..." : `Skapa ${validSuggestions.length} reviewutkast`}
+          </button>
+          <span class="chat-disclaimer">Detta skapar bara reviewutkast i workflow-lagret. Inget skrivs direkt till kanonisk ekonomi.</span>
+        </div>
       </article>
+      <details class="raw-json">
+        <summary>Visa rå input (${review.inputDetails?.text_length || 0} tecken)</summary>
+        <article class="record-card">
+          <div class="detail-grid three fact-grid">
+            ${detailCell("Källa", review.rawSource || "Ej angiven")}
+            ${detailCell("Dokument", review.documentId ? `#${review.documentId}` : "Ingen")}
+            ${detailCell("Extraktion", review.inputDetails?.extraction_mode || "manuell")}
+          </div>
+          ${rawPreviewText ? `<pre class="raw-preview">${escapeHtml(rawPreviewText)}</pre>` : `<div class="empty-state compact"><p>Ingen råtext.</p></div>`}
+        </article>
+      </details>
     </div>
   `;
 }
@@ -3450,7 +3481,7 @@ function renderDocumentsPageV2() {
           <div class="upload-box">
             ${renderDocumentUploadForm()}
           </div>
-          ${renderIngestFutureImagePlaceholder()}
+          ${renderIngestImageReadiness()}
         </article>
         <article class="panel form-card">
           <span class="section-eyebrow">AI-review</span>
@@ -3473,25 +3504,58 @@ function renderDocumentsPageV2() {
           <h3>${drafts.length ? `${drafts.length} utkast att granska` : "Inga utkast att granska"}</h3>
           <p class="muted">Det här är inte kanoniska hushållsposter. Det är reviewobjekt som fortfarande kräver explicit apply senare.</p>
           <div class="record-grid">
-            ${drafts.map((draft) => `
-              <article class="record-card">
-                <div class="record-title-row">
-                  <div>
-                    <h4 class="record-title">${escapeHtml(draft.target_entity_type)}</h4>
-                    <p class="muted">Dokument ${draft.document_id} · status ${escapeHtml(draft.status)}</p>
-                  </div>
-                  <div class="actions-row">
-                    <button class="primary compact" type="button" data-apply-draft="${draft.id}">Applicera</button>
-                    <button class="danger compact" type="button" data-delete-draft="${draft.id}">Avvisa</button>
-                  </div>
-                </div>
-                <pre>${escapeHtml(JSON.stringify(draft.proposed_json, null, 2))}</pre>
-              </article>
-            `).join("") || `<div class="empty-state"><p>Det finns inga väntande reviewutkast.</p></div>`}
+            ${drafts.map((draft) => renderDraftCard(draft)).join("") || `<div class="empty-state"><p>Det finns inga väntande reviewutkast.</p></div>`}
           </div>
         </article>
       </section>
     </section>
+  `;
+}
+
+function draftTargetLabel(targetType) {
+  return {
+    recurring_cost: "Återkommande kostnad",
+    subscription_contract: "Abonnemang",
+    loan: "Lån",
+    income_source: "Inkomstkälla",
+  }[targetType] || targetType;
+}
+
+function draftStatusBadge(status) {
+  return {
+    pending_review: `<span class="badge warning">Väntar på granskning</span>`,
+    approved: `<span class="badge success">Godkänd</span>`,
+    rejected: `<span class="badge muted">Avvisad</span>`,
+  }[status] || `<span class="badge muted">${escapeHtml(status)}</span>`;
+}
+
+function renderDraftCard(draft) {
+  const proposed = draft.proposed_json || {};
+  const title = proposed.provider || proposed.vendor || proposed.lender || proposed.source || draftTargetLabel(draft.target_entity_type);
+  const amount = proposed.amount || proposed.current_monthly_cost || proposed.net_amount || proposed.required_monthly_payment;
+  const freq = proposed.frequency || proposed.billing_frequency;
+  return `
+    <article class="record-card">
+      <div class="record-title-row">
+        <div>
+          <span class="badge ${classificationBadgeTone(draft.target_entity_type)}">${escapeHtml(draftTargetLabel(draft.target_entity_type))}</span>
+          <h4 class="record-title">${escapeHtml(title)}</h4>
+          <p class="muted">Dokument #${draft.document_id}${draft.confidence != null ? ` · confidence ${Math.round(draft.confidence * 100)}%` : ""}</p>
+        </div>
+        <div>
+          ${draftStatusBadge(draft.status)}
+        </div>
+      </div>
+      ${amount != null ? `<div class="detail-grid three fact-grid">${detailCell("Belopp", formatIngestAmount(amount, proposed.currency))}${freq ? detailCell("Frekvens", freq) : ""}${proposed.category ? detailCell("Kategori", proposed.category) : ""}</div>` : ""}
+      <div class="actions-row">
+        <button class="primary compact" type="button" data-apply-draft="${draft.id}">Applicera till kanonisk data</button>
+        <button class="danger compact" type="button" data-delete-draft="${draft.id}">Avvisa</button>
+      </div>
+      <details class="raw-json">
+        <summary>Visa rå JSON</summary>
+        <pre>${escapeHtml(JSON.stringify(proposed, null, 2))}</pre>
+      </details>
+    </article>
   `;
 }
 
@@ -3609,6 +3673,15 @@ function renderReportsPageV2() {
   return `
     <section class="page-wrap">
       ${renderPageHeader("Sparade rapporter", "Genererade rapporter och sammanfattningar")}
+      <article class="panel form-card">
+        <span class="section-eyebrow">Bankkalkyl (PDF)</span>
+        <h3>Exportera hushållskalkyl för banken</h3>
+        <p class="muted">Genererar en professionell PDF med hushållets ekonomi. Lämplig att visa vid bostadslånsansökan.</p>
+        <div class="form-actions">
+          <a class="primary" href="/households/${state.selectedHouseholdId}/export/bank_pdf" target="_blank" ${selectedHousehold() ? "" : "disabled"}>Ladda ned bankkalkyl (PDF)</a>
+        </div>
+        <p class="muted" style="margin-top:var(--space-s)">PDF:en bygger på hushållets registrerade data. Eventuella reviewutkast ingår inte i beräkningarna.</p>
+      </article>
       <section class="split-layout">
         <article class="panel form-card">
           <span class="section-eyebrow">Generera rapport</span>

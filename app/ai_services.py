@@ -11,13 +11,13 @@ from pydantic import BaseModel, Field, ValidationError, confloat
 from sqlalchemy.orm import Session
 
 from . import calculations, models, schemas
-from .ingest_content import extract_text_from_upload, normalize_ingest_text
+from .ingest_content import detect_input_hints, extract_text_from_upload, normalize_ingest_text
 from .settings import Settings
 
 
 DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
 SUPPORTED_INGEST_TARGETS = {"recurring_cost", "subscription_contract", "loan", "income_source"}
-SUPPORTED_INGEST_INPUT_MEDIUMS = {"text", "pdf_text", "uploaded_document", "uploaded_pdf", "image_placeholder"}
+SUPPORTED_INGEST_INPUT_MEDIUMS = {"text", "pdf_text", "uploaded_document", "uploaded_pdf", "image", "bank_paste"}
 
 
 class AIProviderUnavailableError(RuntimeError):
@@ -42,7 +42,7 @@ class AnalysisStructuredOutput(StrictModel):
 
 
 class IngestDocumentClassificationOutput(StrictModel):
-    document_type: Literal["subscription_contract", "invoice", "recurring_cost_candidate", "financial_note", "unclear"]
+    document_type: Literal["subscription_contract", "invoice", "recurring_cost_candidate", "transfer_or_saving_candidate", "bank_row_batch", "insurance_policy", "loan_or_credit", "financial_note", "unclear"]
     provider_name: str | None
     label: str | None
     amount: float | None
@@ -60,7 +60,7 @@ class IngestDocumentClassificationOutput(StrictModel):
 
 class IngestStructuredSuggestion(StrictModel):
     target_entity_type: Literal["recurring_cost", "subscription_contract", "loan", "income_source"]
-    review_bucket: Literal["recurring_cost", "subscription_contract", "loan", "income_source", "unclear"]
+    review_bucket: Literal["recurring_cost", "subscription_contract", "loan", "income_source", "transfer_or_saving", "unclear"]
     title: str
     rationale: str
     confidence: confloat(ge=0.0, le=1.0) | None
@@ -300,18 +300,22 @@ def _normalize_source_channel(source_channel: str | None, input_kind: str | None
     candidate = (source_channel or "").strip().lower()
     if candidate in SUPPORTED_INGEST_INPUT_MEDIUMS:
         return candidate
+    if candidate == "image_placeholder":
+        return "image"
 
     legacy = (input_kind or "").strip().lower()
-    if legacy in {"text", "paste", "bank_copy_paste", "subscription_contract", "invoice_or_bill", "financial_note", "unknown"}:
+    if legacy in {"text", "paste", "subscription_contract", "invoice_or_bill", "financial_note", "unknown"}:
         return "text"
+    if legacy == "bank_copy_paste":
+        return "bank_paste"
     if legacy == "upload_text":
         return "uploaded_document"
     if legacy == "pdf_text":
         return "pdf_text"
     if legacy == "uploaded_pdf":
         return "uploaded_pdf"
-    if legacy == "image_placeholder":
-        return "image_placeholder"
+    if legacy in {"image_placeholder", "image"}:
+        return "image"
     return "text"
 
 
@@ -339,15 +343,17 @@ def _legacy_document_type_for_input(input_kind: str | None) -> str:
 
 
 def _document_type_from_classification(document_type: str, source_channel: str) -> str:
-    if document_type == "subscription_contract":
-        return "contract"
-    if document_type == "invoice":
-        return "invoice"
-    if document_type == "recurring_cost_candidate":
-        return "receipt"
-    if document_type == "financial_note":
-        return "receipt"
-    return "receipt"
+    mapping = {
+        "subscription_contract": "contract",
+        "invoice": "invoice",
+        "bank_row_batch": "bank_statement",
+        "insurance_policy": "contract",
+        "loan_or_credit": "contract",
+        "transfer_or_saving_candidate": "receipt",
+        "recurring_cost_candidate": "receipt",
+        "financial_note": "receipt",
+    }
+    return mapping.get(document_type, "receipt")
 
 
 def _review_bucket_for_suggestion(
@@ -367,6 +373,7 @@ def _review_group_title(group_type: str) -> str:
         "recurring_cost": "Återkommande kostnad",
         "loan": "Lån och avbetalning",
         "income_source": "Inkomstkälla",
+        "transfer_or_saving": "Överföringar och sparande",
         "unclear": "Oklara förslag",
     }.get(group_type, "Oklara förslag")
 
@@ -412,9 +419,6 @@ def _resolve_ingest_input(
     document_id: int | None,
     source_name: str | None,
 ) -> tuple[str, schemas.IngestInputRead]:
-    if source_channel == "image_placeholder":
-        raise AIInputNotSupportedError("Bild- och screenshotavläsning är inte implementerad ännu.")
-
     text = request_input.strip() if request_input else ""
     extraction_notes: list[str] = []
     extraction_mode = "user_paste"
@@ -432,14 +436,20 @@ def _resolve_ingest_input(
         resolved_source_name = source_name or document.issuer or document.file_name
         if document_text:
             text = document_text
-        if extraction_mode == "pdf_text":
+        if extraction_mode in {"ocr_tesseract", "pdf_ocr"}:
+            input_origin = "ocr_image" if extraction_mode == "ocr_tesseract" else "ocr_pdf"
+        elif extraction_mode == "pdf_text":
             input_origin = "pdf_text"
         elif extraction_mode.startswith("document"):
             input_origin = "document_text"
         else:
             input_origin = "file_text"
     else:
-        if source_channel in {"uploaded_document", "uploaded_pdf"}:
+        if source_channel == "image":
+            input_origin = "ocr_image"
+        elif source_channel == "bank_paste":
+            input_origin = "bank_paste"
+        elif source_channel in {"uploaded_document", "uploaded_pdf"}:
             input_origin = "file_text"
         elif source_channel == "pdf_text":
             input_origin = "pdf_text"
@@ -447,10 +457,6 @@ def _resolve_ingest_input(
             input_origin = "user_paste"
 
     if not text:
-        if any("ocr" in note.lower() or "screenshot" in note.lower() for note in extraction_notes):
-            raise AIInputNotSupportedError(
-                "Dokumentet kräver OCR för att bli läsbart. Bild- och screenshotavläsning är inte implementerad ännu."
-            )
         raise AIProviderResponseError("Ingest kräver text eller ett dokument_id med extraherbar text.")
 
     normalized_text = normalize_ingest_text(text)
@@ -611,10 +617,14 @@ def _ingest_field_guides(records: dict[str, list[dict[str, Any]]]) -> dict[str, 
             "subscription_contract",
             "invoice",
             "recurring_cost_candidate",
+            "transfer_or_saving_candidate",
+            "bank_row_batch",
+            "insurance_policy",
+            "loan_or_credit",
             "financial_note",
             "unclear",
         ],
-        "review_buckets": ["recurring_cost", "subscription_contract", "loan", "income_source", "unclear"],
+        "review_buckets": ["recurring_cost", "subscription_contract", "loan", "income_source", "transfer_or_saving", "unclear"],
         "document_summary_shape": {
             "required": [
                 "document_type",
@@ -635,6 +645,7 @@ def _ingest_field_guides(records: dict[str, list[dict[str, Any]]]) -> dict[str, 
             "notes": "Sätt null om ett fält inte framgår tydligt. confirmed_fields får bara innehålla säkert lästa fält.",
         },
         "frequency_values": ["monthly", "yearly", "weekly", "biweekly", "daily"],
+        "frequency_notes": "VIKTIGT: bara dessa frekvenser är tillåtna. Kvartal/quarterly finns inte. Använd yearly med beloppet * 4 om originalet är kvartalsvis. Halvår = yearly med beloppet * 2.",
         "subscription_categories": [
             "mobile",
             "broadband",
@@ -650,6 +661,8 @@ def _ingest_field_guides(records: dict[str, list[dict[str, Any]]]) -> dict[str, 
         "recurring_cost_shape": {
             "required": ["category", "amount", "frequency"],
             "optional": ["vendor", "person_id", "mandatory", "variability_class", "controllability", "note"],
+            "variability_class_values": ["fixed", "variable", "semi_variable"],
+            "controllability_values": ["locked", "negotiable", "reducible", "discretionary"],
         },
         "subscription_contract_shape": {
             "required": ["category", "provider", "current_monthly_cost", "billing_frequency"],
@@ -707,7 +720,7 @@ def _validated_ingest_suggestion(
         target_entity_type=target,
         review_bucket=(
             review_bucket
-            if review_bucket in {"recurring_cost", "subscription_contract", "loan", "income_source", "unclear"}
+            if review_bucket in {"recurring_cost", "subscription_contract", "loan", "income_source", "transfer_or_saving", "unclear"}
             else "unclear"
         ),
         title=suggestion.title,
@@ -742,20 +755,53 @@ def analyze_ingest_input(
         source_name=source_name,
     )
 
-    instructions = (
-        "Analysera svensk hushållstext konservativt. "
-        "Sätt null när något inte syns tydligt och lägg bara säkra fält i confirmed_fields. "
-        "Skapa suggestions bara vid tydligt stöd, sätt review_bucket och använd bara target_entity_type från payload.supported_shapes. "
-        "Visa osäkerhet öppet. Inga direkta skrivningar sker nu."
+    input_hints = detect_input_hints(truncated_input)
+    is_bank_paste = normalized_source_channel == "bank_paste" or "bank_statement_keywords" in input_hints
+    is_ocr = input_details.input_origin in {"ocr_image", "ocr_pdf"}
+
+    base_rules = (
+        "Du analyserar svenskt hushållsunderlag konservativt. "
+        "Ditt uppdrag: (1) klassificera dokumenttyp, (2) extrahera kärnfakta, (3) visa osäkerhet. "
+        "Regler: "
+        "- Sätt null när ett fält inte syns tydligt i texten. "
+        "- confirmed_fields får bara innehålla fält som kan läsas direkt ur texten utan gissning. "
+        "- Om texten ser ut som en faktura, identifiera leverantör, belopp, valuta, förfallodatum, frekvens. "
+        "- Om texten ser ut som ett abonnemang, identifiera leverantör, kostnad/månad, bindning, kategori. "
+        "- Skapa suggestions bara när det finns tydligt stöd. "
+        "- review_bucket ska matcha den mest sannolika måltypen. "
+        "- Hellre unclear med ärlig osäkerhet än säker med felaktig klassificering. "
+        "- Inga direkta skrivningar sker nu."
     )
+    bank_rules = (
+        " Extra regler för bankrader: "
+        "- Klassificera som bank_row_batch. "
+        "- Gruppera rader konservativt: troliga abonnemang -> review_bucket subscription_contract, "
+        "troliga återkommande kostnader -> recurring_cost, troliga överföringar/sparande -> transfer_or_saving, oklara -> unclear. "
+        "- Skapa en suggestion per tydligt identifierbar rad eller grupp. "
+        "- Varje suggestion ska ha en beskrivande title med mottagare/avsändare och belopp. "
+        "- Belopp under 0 (negativt) = utgift/kostnad. Belopp över 0 = inkomst/insättning. "
+        "- Ange uncertainty_notes för rader som kan tolkas på flera sätt."
+    )
+    ocr_rules = (
+        " Extra: texten kommer från OCR (bildavläsning) och kan innehålla felläsningar. "
+        "Var extra konservativ med confidence och confirmed_fields."
+    )
+
+    instructions = base_rules
+    if is_bank_paste:
+        instructions += bank_rules
+    if is_ocr:
+        instructions += ocr_rules
     payload = {
         "input_kind": _legacy_input_kind(input_kind),
         "source_channel": normalized_source_channel,
         "source_name": input_details.source_name,
         "document_id": document_id,
+        "input_hints": input_hints,
         "raw_text": truncated_input,
         "supported_shapes": _ingest_field_guides(records),
     }
+    max_tokens = 1400 if is_bank_paste else 720
     structured, model_name, usage = _call_openai_structured(
         settings,
         model=_ingest_model(settings),
@@ -763,7 +809,7 @@ def analyze_ingest_input(
         payload=payload,
         response_model=IngestStructuredOutput,
         schema_name="ingest_response",
-        max_output_tokens=720,
+        max_output_tokens=max_tokens,
     )
     suggestions = [
         _validated_ingest_suggestion(household_id, suggestion, structured.classification)
@@ -789,7 +835,7 @@ def analyze_ingest_input(
             summary=structured.summary,
             guidance=guidance,
             suggestions=suggestions,
-            future_image_readiness=schemas.IngestFutureImageReadinessRead(),
+            image_readiness=schemas.IngestImageReadinessRead(),
             provider="openai",
             model=model_name,
             usage=usage,
@@ -804,8 +850,6 @@ def promote_ingest_suggestions(
     request_body: schemas.IngestPromoteRequest,
 ) -> schemas.IngestPromoteResponse:
     normalized_source_channel = _normalize_source_channel(request_body.source_channel, request_body.input_kind)
-    if normalized_source_channel == "image_placeholder":
-        raise AIInputNotSupportedError("Bild- och screenshotavläsning är inte implementerad ännu.")
 
     valid_suggestions = [item for item in request_body.suggestions if item.validation_status == "valid"]
     if not valid_suggestions:

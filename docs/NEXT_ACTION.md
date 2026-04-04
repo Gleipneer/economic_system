@@ -1,11 +1,11 @@
 # Next Action
 
 Canonical status: single recommended next task for the next agent pass.
-Last reviewed: 2026-04-03.
+Last reviewed: 2026-04-04.
 
 ## Next Task
 
-Harden LF-style bank copy-paste ingest into a genuinely useful review flow.
+Improve review UX for batched bank paste results and OCR-extracted documents.
 
 ## Why This Comes Next
 

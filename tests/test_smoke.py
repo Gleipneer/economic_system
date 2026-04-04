@@ -513,7 +513,7 @@ def test_ingest_analyze_returns_document_summary_and_review_groups(tmp_path, mon
         assert payload["review_groups"][0]["suggestion_count"] == 1
         assert payload["input_details"]["source_channel"] == "uploaded_pdf"
         assert payload["input_details"]["document_id"] == document_id
-        assert payload["future_image_readiness"]["supported"] is False
+        assert payload["image_readiness"]["supported"] is True
 
 
 def test_ingest_analyze_ignores_invalid_due_date_from_model(tmp_path, monkeypatch):
@@ -659,7 +659,8 @@ def test_ingest_promote_reuses_existing_document_id(tmp_path):
         assert recurring_after_count == recurring_before_count
 
 
-def test_ingest_analyze_rejects_image_placeholder(tmp_path):
+def test_ingest_analyze_accepts_image_source_channel(tmp_path):
+    """image source channel is now supported — verify it normalizes correctly."""
     app = load_app(tmp_path)
     with TestClient(app) as client:
         ids = create_household_fixture(client)
@@ -667,13 +668,13 @@ def test_ingest_analyze_rejects_image_placeholder(tmp_path):
 
         response = client.post(
             f"/households/{household_id}/ingest_ai/analyze",
-            json={"input_text": "något", "source_channel": "image_placeholder"},
+            json={"input_text": "OCR text from an image: Faktura 299 kr", "source_channel": "image"},
         )
-        assert response.status_code == 501
-        assert "bild" in response.json()["detail"].lower()
+        assert response.status_code in {200, 503}
 
 
-def test_document_upload_marks_image_as_ocr_pending(tmp_path):
+def test_document_upload_handles_image_with_ocr(tmp_path):
+    """Real OCR is now attempted on images. Fake PNG data results in parse_failed."""
     app = load_app(tmp_path)
     with TestClient(app) as client:
         ids = create_household_fixture(client)
@@ -686,5 +687,228 @@ def test_document_upload_marks_image_as_ocr_pending(tmp_path):
         )
         assert upload.status_code == 201
         payload = upload.json()
-        assert payload["extracted_text"] is None
-        assert payload["extraction_status"] == "ocr_pending"
+        assert payload["extraction_status"] in {"parse_failed", "ocr_parsed"}
+
+
+def test_normalize_ingest_text_handles_pdf_paste_artifacts():
+    from app.ingest_content import normalize_ingest_text
+
+    raw = "Faktura\u00a0123\r\nBelopp:\u200b 1\u00a0500,00\fSida 2\r\nLeverantör: Test AB"
+    result = normalize_ingest_text(raw)
+    assert "\u00a0" not in result
+    assert "\u200b" not in result
+    assert "\f" not in result
+    assert "Faktura 123" in result
+    assert "Sida 2" in result
+
+
+def test_detect_input_hints_finds_invoice_keywords():
+    from app.ingest_content import detect_input_hints
+
+    invoice_text = "Faktura 2026-04-01\nFörfallodatum: 2026-04-30\nBelopp: 1 299,00 SEK\nBankgiro: 123-4567"
+    hints = detect_input_hints(invoice_text)
+    assert "invoice_keywords" in hints
+    assert "iso_dates" in hints
+    assert "swedish_amounts" in hints
+
+
+def test_detect_input_hints_finds_subscription_keywords():
+    from app.ingest_content import detect_input_hints
+
+    sub_text = "Abonnemang: Telia Bredband\nBindningstid: 24 månader\nKostnad: 399 kr/mån"
+    hints = detect_input_hints(sub_text)
+    assert "subscription_keywords" in hints
+    assert "monthly_cost_pattern" in hints
+
+
+def test_detect_input_hints_returns_empty_for_generic_text():
+    from app.ingest_content import detect_input_hints
+
+    hints = detect_input_hints("Hej, detta är en generisk text utan specifika nyckelord.")
+    assert hints == []
+
+
+def test_ingest_analyze_includes_input_hints_in_payload(tmp_path, monkeypatch):
+    app = load_app(tmp_path)
+    from app import ai_services
+    from app import schemas
+
+    captured_payload = {}
+
+    app_response = ai_services.IngestStructuredOutput(
+        classification=ai_services.IngestDocumentClassificationOutput(
+            document_type="invoice",
+            provider_name="Telia",
+            label="Telia faktura",
+            amount=399.0,
+            currency="SEK",
+            due_date="2026-04-30",
+            cadence="monthly",
+            category_hint="broadband",
+            suggested_target_entity_type="subscription_contract",
+            household_relevance="high",
+            confidence=0.88,
+            confirmed_fields=["provider_name", "amount", "currency"],
+            notes=["Bredbandsabonnemang med tydligt belopp."],
+            uncertainty_reasons=["Bindningstiden tolkas från text."],
+        ),
+        summary="En faktura för ett bredbandsabonnemang hos Telia.",
+        guidance=["Tydligt abonnemang. Granska om bindningstid stämmer."],
+        suggestions=[
+            ai_services.IngestStructuredSuggestion(
+                target_entity_type="subscription_contract",
+                review_bucket="subscription_contract",
+                title="Telia Bredband",
+                rationale="Tydlig faktura med månatlig kostnad.",
+                confidence=0.85,
+                proposed_json='{"household_id": 1, "category": "broadband", "provider": "Telia", "current_monthly_cost": 399, "billing_frequency": "monthly"}',
+                uncertainty_notes=["Bindningstid tolkas som 24 månader."],
+            )
+        ],
+    )
+
+    original_call = ai_services._call_openai_structured
+
+    def fake_call_openai_structured(settings, *, model, instructions, payload, response_model, schema_name, max_output_tokens):
+        captured_payload.update(payload)
+        return app_response, "gpt-test", schemas.AIUsageRead(input_tokens=150, output_tokens=80, total_tokens=230)
+
+    monkeypatch.setattr(ai_services, "_call_openai_structured", fake_call_openai_structured)
+
+    with TestClient(app) as client:
+        ids = create_household_fixture(client)
+        household_id = ids["household_id"]
+
+        response = client.post(
+            f"/households/{household_id}/ingest_ai/analyze",
+            json={
+                "input_text": "Faktura 2026-04-01\nTelia Bredband\nKostnad: 399 kr/mån\nFörfallodatum: 2026-04-30",
+                "input_kind": "text",
+                "source_channel": "text",
+                "source_name": "Telia",
+            },
+        )
+        assert response.status_code == 200
+        assert "input_hints" in captured_payload
+        assert "invoice_keywords" in captured_payload["input_hints"]
+        assert "monthly_cost_pattern" in captured_payload["input_hints"]
+
+        payload = response.json()
+        assert payload["document_summary"]["document_type"] == "invoice"
+        assert payload["document_summary"]["provider_name"] == "Telia"
+        assert payload["document_summary"]["amount"] == 399.0
+        assert payload["suggestions"][0]["review_bucket"] == "subscription_contract"
+
+
+def test_tesseract_ocr_extractor_on_real_image():
+    from PIL import Image
+    from app.ingest_content import TesseractOCRExtractor
+
+    img = Image.new("RGB", (400, 100), "white")
+    from PIL import ImageDraw
+    draw = ImageDraw.Draw(img)
+    draw.text((10, 30), "Faktura 299 SEK", fill="black")
+
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    raw = buf.getvalue()
+
+    extractor = TesseractOCRExtractor()
+    result = extractor.extract_text(raw, file_name="test.png", mime_type="image/png")
+    assert result.extraction_mode == "ocr_tesseract"
+    assert result.text is not None
+    assert len(result.text) > 0
+
+
+def test_tesseract_ocr_extractor_on_corrupt_image():
+    from app.ingest_content import TesseractOCRExtractor
+
+    extractor = TesseractOCRExtractor()
+    result = extractor.extract_text(b"not an image at all", file_name="bad.png", mime_type="image/png")
+    assert result.extraction_mode == "ocr_image_unreadable"
+    assert result.text is None
+
+
+def test_bank_paste_source_channel_normalizes():
+    from app.ai_services import _normalize_source_channel
+    assert _normalize_source_channel("bank_paste", None) == "bank_paste"
+    assert _normalize_source_channel(None, "bank_copy_paste") == "bank_paste"
+    assert _normalize_source_channel("image", None) == "image"
+    assert _normalize_source_channel("image_placeholder", None) == "image"
+
+
+def test_ingest_analyze_bank_paste_with_mock(tmp_path, monkeypatch):
+    app = load_app(tmp_path)
+    from app import ai_services
+    from app import schemas
+
+    app_response = ai_services.IngestStructuredOutput(
+        classification=ai_services.IngestDocumentClassificationOutput(
+            document_type="bank_row_batch",
+            provider_name=None,
+            label="Kontoutdrag LF",
+            amount=None,
+            currency="SEK",
+            due_date=None,
+            cadence=None,
+            category_hint=None,
+            suggested_target_entity_type=None,
+            household_relevance="high",
+            confidence=0.7,
+            confirmed_fields=["currency"],
+            notes=["LF-format kontoutdrag med 3 rader."],
+            uncertainty_reasons=["Raderna har varierande tolkningssäkerhet."],
+        ),
+        summary="Kontoutdrag med tre rader.",
+        guidance=["Granska varje rad separat."],
+        suggestions=[
+            ai_services.IngestStructuredSuggestion(
+                target_entity_type="recurring_cost",
+                review_bucket="recurring_cost",
+                title="ICA MAXI -1245,00",
+                rationale="Trolig matinköpskostnad.",
+                confidence=0.6,
+                proposed_json='{"household_id": 1, "category": "other", "amount": 1245, "frequency": "monthly", "vendor": "ICA MAXI", "mandatory": true, "variability_class": "variable", "controllability": "reducible"}',
+                uncertainty_notes=["Frekvensen är osäker."],
+            ),
+        ],
+    )
+
+    def fake_call(settings, *, model, instructions, payload, response_model, schema_name, max_output_tokens):
+        assert max_output_tokens > 720
+        assert "bank_row_batch" in instructions or "bankrader" in instructions.lower()
+        return app_response, "gpt-test", schemas.AIUsageRead(input_tokens=200, output_tokens=150, total_tokens=350)
+
+    monkeypatch.setattr(ai_services, "_call_openai_structured", fake_call)
+
+    with TestClient(app) as client:
+        ids = create_household_fixture(client)
+        household_id = ids["household_id"]
+
+        response = client.post(
+            f"/households/{household_id}/ingest_ai/analyze",
+            json={
+                "input_text": "Bokföringsdatum\tTransaktionsdatum\tTransaktionstext\tBelopp\tSaldo\n2026-03-15\t2026-03-14\tICA MAXI\t-1245,00\t23456,78",
+                "source_channel": "bank_paste",
+                "source_name": "LF konto",
+            },
+        )
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["document_summary"]["document_type"] == "bank_row_batch"
+        assert payload["source_channel"] == "bank_paste"
+        assert len(payload["suggestions"]) == 1
+        assert payload["suggestions"][0]["review_bucket"] == "recurring_cost"
+
+
+def test_bank_pdf_export_generates_valid_pdf(tmp_path):
+    app = load_app(tmp_path)
+    with TestClient(app) as client:
+        ids = create_household_fixture(client)
+        household_id = ids["household_id"]
+
+        response = client.get(f"/households/{household_id}/export/bank_pdf")
+        assert response.status_code == 200
+        assert response.headers["content-type"] == "application/pdf"
+        assert b"%PDF" in response.content[:10]
+        assert len(response.content) > 1000
