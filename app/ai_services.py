@@ -661,7 +661,7 @@ def _ingest_field_guides(records: dict[str, list[dict[str, Any]]]) -> dict[str, 
         "recurring_cost_shape": {
             "required": ["category", "amount", "frequency"],
             "optional": ["vendor", "person_id", "mandatory", "variability_class", "controllability", "note"],
-            "variability_class_values": ["fixed", "variable", "semi_variable"],
+            "variability_class_values": ["fixed", "semi_fixed", "variable"],
             "controllability_values": ["locked", "negotiable", "reducible", "discretionary"],
         },
         "subscription_contract_shape": {
