@@ -692,6 +692,12 @@ class ReportSnapshotRead(ReportSnapshotBase):
         orm_mode = True
 
 
+class RiskSignalRead(BaseModel):
+    key: str
+    severity: Literal["info", "warning", "critical"]
+    message_sv: str
+
+
 class HouseholdSummaryRead(BaseModel):
     household_id: int
     monthly_income: float
@@ -713,6 +719,7 @@ class HouseholdSummaryRead(BaseModel):
     net_worth_estimate: float
     gross_income_only_entries: int
     counts: Dict[str, int]
+    risk_signals: List[RiskSignalRead] = Field(default_factory=list)
 
 
 class HousingScenarioEvaluationRead(BaseModel):
@@ -769,6 +776,26 @@ class AssistantPromptResponse(BaseModel):
     usage: Optional[AIUsageRead] = None
 
 
+# -------- MerchantAlias --------
+class MerchantAliasCreate(BaseModel):
+    household_id: int
+    alias: str
+    canonical_name: str
+    category_hint: Optional[str] = None
+
+
+class MerchantAliasRead(BaseModel):
+    id: int
+    household_id: int
+    alias: str
+    canonical_name: str
+    category_hint: Optional[str] = None
+    created_at: datetime
+
+    class Config:
+        orm_mode = True
+
+
 class IngestSuggestionRead(BaseModel):
     target_entity_type: Literal["recurring_cost", "subscription_contract", "loan", "income_source"]
     review_bucket: Literal["recurring_cost", "subscription_contract", "loan", "income_source", "transfer_or_saving", "unclear"] = "unclear"
@@ -779,6 +806,9 @@ class IngestSuggestionRead(BaseModel):
     validation_status: Literal["valid", "invalid"] = "valid"
     validation_errors: List[str] = Field(default_factory=list)
     uncertainty_notes: List[str] = Field(default_factory=list)
+    duplicate_indicator: Optional[str] = None
+    ownership_candidate: Optional[Literal["private", "shared", "unclear"]] = None
+    why_suggested: Optional[str] = None
 
 
 class IngestImageReadinessRead(BaseModel):

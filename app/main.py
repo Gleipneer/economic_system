@@ -1018,6 +1018,33 @@ def delete_report_snapshot(snapshot_id: int, db: Session = Depends(get_db)):
     return
 
 
+# --- Merchant Alias Endpoints ---
+@app.get("/households/{household_id}/merchant_aliases", response_model=List[schemas.MerchantAliasRead])
+def list_merchant_aliases(household_id: int, db: Session = Depends(get_db)):
+    ensure_household_exists(db, household_id)
+    return db.query(models.MerchantAlias).filter_by(household_id=household_id).all()
+
+
+@app.post("/households/{household_id}/merchant_aliases", response_model=schemas.MerchantAliasRead, status_code=status.HTTP_201_CREATED)
+def create_merchant_alias(household_id: int, alias: schemas.MerchantAliasCreate, db: Session = Depends(get_db)):
+    ensure_household_exists(db, household_id)
+    db_alias = models.MerchantAlias(household_id=household_id, alias=alias.alias.strip().lower(), canonical_name=alias.canonical_name.strip(), category_hint=alias.category_hint)
+    db.add(db_alias)
+    db.commit()
+    db.refresh(db_alias)
+    return db_alias
+
+
+@app.delete("/households/{household_id}/merchant_aliases/{alias_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_merchant_alias(household_id: int, alias_id: int, db: Session = Depends(get_db)):
+    alias = db.get(models.MerchantAlias, alias_id)
+    if alias is None or alias.household_id != household_id:
+        raise HTTPException(status_code=404, detail="Alias hittades inte.")
+    db.delete(alias)
+    db.commit()
+    return
+
+
 @app.get("/housing_scenarios/{scenario_id}/evaluate", response_model=schemas.HousingScenarioEvaluationRead)
 def evaluate_housing_scenario_endpoint(scenario_id: int, db: Session = Depends(get_db)):
     scenario = get_object_or_404(db, models.HousingScenario, scenario_id)

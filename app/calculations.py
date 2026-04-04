@@ -107,6 +107,51 @@ def load_household_records(db: Session, household_id: int) -> dict[str, list[dic
     }
 
 
+def _build_risk_signals(
+    *,
+    monthly_income: float,
+    monthly_total_expenses: float,
+    monthly_net_cashflow: float,
+    monthly_subscriptions: float,
+    loan_balance_total: float,
+    gross_income_only_entries: int,
+    records: dict[str, list[dict[str, Any]]],
+) -> list[dict[str, str]]:
+    signals: list[dict[str, str]] = []
+
+    if monthly_income > 0 and monthly_net_cashflow < monthly_income * 0.1:
+        signals.append({"key": "low_margin", "severity": "warning", "message_sv": f"Låg marginal: kassaflödet är bara {round(monthly_net_cashflow):,} kr/mån efter utgifter.".replace(",", " ")})
+
+    if monthly_income > 0 and monthly_net_cashflow < 0:
+        signals.append({"key": "negative_cashflow", "severity": "critical", "message_sv": "Negativt kassaflöde: utgifterna överstiger inkomsterna."})
+
+    if monthly_income > 0 and monthly_total_expenses > monthly_income * 0.85:
+        pct = round(monthly_total_expenses / monthly_income * 100)
+        signals.append({"key": "high_fixed_ratio", "severity": "warning", "message_sv": f"Hög andel bundna kostnader: {pct} % av inkomsten går till fasta utgifter."})
+
+    if monthly_income > 0 and monthly_subscriptions > monthly_income * 0.15:
+        signals.append({"key": "high_subscription_cost", "severity": "info", "message_sv": f"Abonnemangskostnad {round(monthly_subscriptions):,} kr/mån — överväg granskning.".replace(",", " ")})
+
+    if loan_balance_total > 0 and monthly_income > 0:
+        debt_ratio = loan_balance_total / (monthly_income * MONTHS_PER_YEAR)
+        if debt_ratio > 4.5:
+            signals.append({"key": "high_debt_ratio", "severity": "critical", "message_sv": f"Hög skuldsättning: skuld/årsinkomst = {debt_ratio:.1f}x."})
+        elif debt_ratio > 3:
+            signals.append({"key": "elevated_debt_ratio", "severity": "warning", "message_sv": f"Förhöjd skuldsättning: skuld/årsinkomst = {debt_ratio:.1f}x."})
+
+    if gross_income_only_entries > 0:
+        signals.append({"key": "unverified_income", "severity": "info", "message_sv": f"{gross_income_only_entries} inkomstkälla(or) saknar nettobelopp och visas med brutto."})
+
+    pending_drafts = sum(1 for d in records.get("extraction_drafts", []) if d.get("status") == "pending_review")
+    if pending_drafts > 0:
+        signals.append({"key": "pending_reviews", "severity": "info", "message_sv": f"{pending_drafts} reviewutkast väntar på granskning."})
+
+    if not records.get("income_sources"):
+        signals.append({"key": "no_income", "severity": "warning", "message_sv": "Inga inkomstkällor registrerade."})
+
+    return signals
+
+
 def build_household_summary(records: dict[str, list[dict[str, Any]]], household_id: int) -> dict[str, Any]:
     monthly_income_net = sum(
         amount_to_monthly(item.get("net_amount"), item.get("frequency"))
@@ -149,6 +194,16 @@ def build_household_summary(records: dict[str, list[dict[str, Any]]], household_
     loan_balance_total = sum(float(item.get("current_balance") or 0.0) for item in records["loans"])
     net_worth_estimate = asset_market_value - loan_balance_total
 
+    risk_signals = _build_risk_signals(
+        monthly_income=monthly_income,
+        monthly_total_expenses=monthly_total_expenses,
+        monthly_net_cashflow=monthly_net_cashflow,
+        monthly_subscriptions=monthly_subscriptions,
+        loan_balance_total=loan_balance_total,
+        gross_income_only_entries=gross_income_only_entries,
+        records=records,
+    )
+
     return {
         "household_id": household_id,
         "monthly_income": round(monthly_income, 2),
@@ -169,6 +224,7 @@ def build_household_summary(records: dict[str, list[dict[str, Any]]], household_
         "loan_balance_total": round(loan_balance_total, 2),
         "net_worth_estimate": round(net_worth_estimate, 2),
         "gross_income_only_entries": gross_income_only_entries,
+        "risk_signals": risk_signals,
         "counts": {
             "persons": len(records["persons"]),
             "income_sources": len(records["income_sources"]),

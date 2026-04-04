@@ -283,6 +283,14 @@ def generate_bank_pdf(db: Session, household_id: int) -> bytes:
             ("Nettovärde (tillgångar − skulder)", _sek(summary["net_worth_estimate"])),
         ]))
 
+    risk_signals = summary.get("risk_signals", [])
+    if risk_signals:
+        story.append(Paragraph("Risksignaler", s["h2"]))
+        for sig in risk_signals:
+            prefix = {"critical": "⚠ KRITISK", "warning": "⚠ VARNING", "info": "ℹ"}.get(sig.get("severity"), "ℹ")
+            story.append(Paragraph(f"{prefix}: {sig.get('message_sv', '')}", s["body"]))
+        story.append(Spacer(1, 2 * mm))
+
     story.append(Spacer(1, 6 * mm))
     story.append(HRFlowable(width="100%", thickness=0.5, color=BRAND_MUTED, spaceAfter=3 * mm))
     story.append(Paragraph("Datakällor och osäkerhet", s["h3"]))

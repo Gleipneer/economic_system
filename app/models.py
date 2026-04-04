@@ -431,6 +431,17 @@ class ScenarioResult(Base):
     scenario = relationship("Scenario", back_populates="results")
 
 
+class MerchantAlias(Base):
+    __tablename__ = "merchant_aliases"
+    id = Column(Integer, primary_key=True, index=True)
+    household_id = Column(Integer, ForeignKey("households.id", ondelete="CASCADE"), nullable=False)
+    alias = Column(String, nullable=False)
+    canonical_name = Column(String, nullable=False)
+    category_hint = Column(String, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    household = relationship("Household")
+
+
 class ReportSnapshot(Base):
     __tablename__ = "report_snapshots"
     id = Column(Integer, primary_key=True, index=True)

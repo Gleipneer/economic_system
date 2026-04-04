@@ -59,8 +59,8 @@ underlag
 - [x] bank_row_batch
 - [x] financial_note
 - [x] unclear
-- [ ] insurance_policy (tillägg behövs i AI-schema)
-- [ ] loan_or_credit (tillägg behövs i AI-schema)
+- [x] insurance_policy
+- [x] loan_or_credit
 
 ### 1.3 Fältextraktion
 - [x] provider_name
@@ -85,9 +85,9 @@ underlag
 - [x] ExtractionDraft med pending_review status
 - [x] Applicera (apply) knapp per utkast
 - [x] Avvisa (delete) knapp per utkast
-- [ ] Redigera utkast innan apply
-- [ ] Skjut upp (defer) funktion
-- [ ] Bättre visuell status per utkast (confidence badge, typ-label)
+- [x] Bättre visuell status per utkast (confidence badge, typ-label, belopp)
+- [x] Redigera utkast inline innan apply (JSON-editor med spara/avbryt)
+- [x] Skjut upp (defer) funktion (sätter status till deferred)
 
 ### 1.6 LF Bank Copy-Paste
 - [x] bank_paste source channel
@@ -96,23 +96,49 @@ underlag
 - [x] Högre max_output_tokens (1400) för batchsvar
 - [x] Live-testat med LF-format
 
+### 1.7 Bank-Ready PDF Export
+- [x] reportlab-baserad PDF-generering (app/pdf_export.py)
+- [x] GET /households/{id}/export/bank_pdf endpoint
+- [x] Professionell svensk layout: personer, inkomster, kostnader, lån, boendekalkyl, tillgångar
+- [x] Knapp på rapportsidan
+- [x] Datumstämpel och källstatusnotering
+- [x] Test: test_bank_pdf_export_generates_valid_pdf
+
 ---
 
 ## FAS 2 — Smartare normalisering (SNART)
 
 ### 2.1 Merchant-normalisering
-- [ ] Identifiera att NETFLIX.COM, Netflix, NETFLIX Amsterdam = samma aktör
-- [ ] Normalisera leverantörsnamn vid review
+- [x] MerchantAlias-modell (alias → canonical_name, category_hint)
+- [x] API: list/create/delete per hushåll
+- [x] Normalisering appliceras på ingest-text innan AI-analys
+- [x] Frontend: hantera aliases i UI (lista, skapa, ta bort) på Documents-sidan
 
 ### 2.2 Dubblettkontroll
-- [ ] Detektera om samma faktura kom in via PDF och screenshot
-- [ ] Varna vid möjlig dubblett i review queue
+- [x] Detektera dubbletter mot väntande drafts (samma provider+belopp)
+- [x] Visa duplicate_indicator i review UI
+- [ ] Detektera dubbletter mot kanonisk data (subscriptions, recurring costs)
+- [ ] Varna vid samma underlag i annan kanal (PDF vs screenshot)
 
 ### 2.3 Ownership-förslag
-- [ ] Föreslå privat / gemensam / oklar ägare
-- [ ] Relevant för tvåpersonershushåll
+- [x] ownership_candidate (private/shared/unclear) på varje suggestion
+- [x] Heuristik baserad på kategori och leverantörstyp
+- [x] Visas i review UI med färgkodad badge
+- [ ] Redigerbart ownership-fält i draft editing
 
-### 2.4 Regelmotor
+### 2.4 Förklaringsmotor (Why-Engine)
+- [x] why_suggested fält på varje suggestion
+- [x] AI-rationale eller genererad förklaring
+- [x] Visas i review UI
+- [ ] Utöka med evidenskedja (document → extraction → classification → suggestion)
+
+### 2.5 Risksignaler
+- [x] risk_signals på household summary (8 signaltyper)
+- [x] Visas på översiktssidan med severity-badges
+- [x] Inkluderas i PDF-export
+- [ ] Fler signaler: ovanliga kostnadsökningar, nya återkommande poster
+
+### 2.6 Regelmotor
 - [ ] Användaren kan godkänna mönster (t.ex. "Google One = abonnemang")
 - [ ] Regler tillämpas vid framtida ingest
 

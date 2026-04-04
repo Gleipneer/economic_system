@@ -661,7 +661,7 @@ def _ingest_field_guides(records: dict[str, list[dict[str, Any]]]) -> dict[str, 
         "recurring_cost_shape": {
             "required": ["category", "amount", "frequency"],
             "optional": ["vendor", "person_id", "mandatory", "variability_class", "controllability", "note"],
-            "variability_class_values": ["fixed", "variable", "semi_variable"],
+            "variability_class_values": ["fixed", "semi_fixed", "variable"],
             "controllability_values": ["locked", "negotiable", "reducible", "discretionary"],
         },
         "subscription_contract_shape": {
@@ -677,6 +677,80 @@ def _ingest_field_guides(records: dict[str, list[dict[str, Any]]]) -> dict[str, 
             "optional": ["net_amount", "gross_amount", "frequency", "source", "note"],
         },
     }
+
+
+SHARED_CATEGORIES = {"mat", "boende", "transport", "barn", "hushåll", "broadband", "electricity", "alarm"}
+PRIVATE_CATEGORIES = {"gym", "streaming", "software", "membership", "mobile"}
+
+
+def _infer_ownership_candidate(target: str, proposed_json: dict, title: str) -> str:
+    """Conservative ownership heuristic: private, shared, or unclear."""
+    category = (proposed_json.get("category") or "").lower()
+    provider = (proposed_json.get("provider") or proposed_json.get("vendor") or "").lower()
+
+    if category in SHARED_CATEGORIES:
+        return "shared"
+    if category in PRIVATE_CATEGORIES:
+        return "private"
+    if any(kw in provider for kw in ["ica", "coop", "hemköp", "willys", "hyra", "el ", "vatten"]):
+        return "shared"
+    return "unclear"
+
+
+def _build_why_suggested(target: str, proposed_json: dict, confidence: float | None) -> str:
+    """Build a human-readable explanation for why this suggestion was created."""
+    parts = []
+    if target == "subscription_contract":
+        parts.append("Klassad som abonnemang")
+    elif target == "recurring_cost":
+        parts.append("Klassad som återkommande kostnad")
+    elif target == "loan":
+        parts.append("Klassad som lån/kredit")
+    elif target == "income_source":
+        parts.append("Klassad som inkomst")
+
+    provider = proposed_json.get("provider") or proposed_json.get("vendor")
+    if provider:
+        parts.append(f"leverantör: {provider}")
+    amount = proposed_json.get("amount") or proposed_json.get("current_monthly_cost") or proposed_json.get("net_amount")
+    if amount:
+        parts.append(f"belopp: {amount} kr")
+    if confidence is not None:
+        parts.append(f"confidence: {round(confidence * 100)}%")
+    return ". ".join(parts) + "." if parts else "Baserat på AI-tolkning av underlaget."
+
+
+def _check_duplicate_indicator(
+    db: Session,
+    household_id: int,
+    suggestion: schemas.IngestSuggestionRead,
+) -> str | None:
+    """Check if a similar draft or canonical record already exists."""
+    proposed = suggestion.proposed_json
+    provider = (proposed.get("provider") or proposed.get("vendor") or proposed.get("lender") or "").strip().lower()
+    amount = proposed.get("amount") or proposed.get("current_monthly_cost") or proposed.get("required_monthly_payment")
+
+    if not provider and amount is None:
+        return None
+
+    try:
+        existing_drafts = db.query(models.ExtractionDraft).filter_by(
+            household_id=household_id,
+            target_entity_type=suggestion.target_entity_type,
+        ).filter(models.ExtractionDraft.status.in_(["pending_review", "deferred"])).all()
+    except Exception:
+        return None
+
+    for draft in existing_drafts:
+        dj = draft.proposed_json or {}
+        d_provider = (dj.get("provider") or dj.get("vendor") or dj.get("lender") or "").strip().lower()
+        d_amount = dj.get("amount") or dj.get("current_monthly_cost") or dj.get("required_monthly_payment")
+        if provider and d_provider and provider == d_provider:
+            if amount is not None and d_amount is not None and abs(float(amount) - float(d_amount)) < 1.0:
+                return f"Möjlig dubblett: liknande utkast #{draft.id} ({d_provider}, {d_amount} kr) väntar redan."
+            return f"Samma leverantör finns redan i utkast #{draft.id} ({d_provider})."
+
+    return None
 
 
 def _validated_ingest_suggestion(
@@ -716,6 +790,9 @@ def _validated_ingest_suggestion(
 
     review_bucket = _review_bucket_for_suggestion(suggestion, classification)
 
+    ownership = _infer_ownership_candidate(target, proposed_json, suggestion.title)
+    why = suggestion.rationale or _build_why_suggested(target, proposed_json, suggestion.confidence)
+
     return schemas.IngestSuggestionRead(
         target_entity_type=target,
         review_bucket=(
@@ -730,7 +807,30 @@ def _validated_ingest_suggestion(
         validation_status="invalid" if validation_errors else "valid",
         validation_errors=validation_errors,
         uncertainty_notes=suggestion.uncertainty_notes,
+        ownership_candidate=ownership,
+        why_suggested=why,
     )
+
+
+def _load_merchant_aliases(db: Session, household_id: int) -> list[tuple[str, str]]:
+    """Load merchant aliases for a household. Returns [(lowercase_alias, canonical_name)].
+    Gracefully returns empty list if table doesn't exist yet."""
+    try:
+        aliases = db.query(models.MerchantAlias).filter_by(household_id=household_id).all()
+        return [(a.alias.lower(), a.canonical_name) for a in aliases]
+    except Exception:
+        return []
+
+
+def _apply_merchant_normalization(text: str, aliases: list[tuple[str, str]]) -> str:
+    """Replace known merchant aliases in text with their canonical names."""
+    if not aliases:
+        return text
+    import re
+    for alias, canonical in aliases:
+        pattern = re.compile(re.escape(alias), re.IGNORECASE)
+        text = pattern.sub(canonical, text)
+    return text
 
 
 def analyze_ingest_input(
@@ -754,6 +854,9 @@ def analyze_ingest_input(
         document_id=document_id,
         source_name=source_name,
     )
+
+    merchant_aliases = _load_merchant_aliases(db, household_id)
+    truncated_input = _apply_merchant_normalization(truncated_input, merchant_aliases)
 
     input_hints = detect_input_hints(truncated_input)
     is_bank_paste = normalized_source_channel == "bank_paste" or "bank_statement_keywords" in input_hints
@@ -815,6 +918,10 @@ def analyze_ingest_input(
         _validated_ingest_suggestion(household_id, suggestion, structured.classification)
         for suggestion in structured.suggestions
     ]
+    for s in suggestions:
+        dup = _check_duplicate_indicator(db, household_id, s)
+        if dup:
+            s.duplicate_indicator = dup
     document_summary = _build_document_summary_read(structured.classification)
     review_groups = _group_ingest_suggestions(suggestions, document_summary)
     guidance = list(structured.guidance)
