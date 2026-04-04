@@ -2236,6 +2236,8 @@ state.ui = {
   ingestPending: false,
   ingestPromoting: false,
   ingestResult: null,
+  editingDraftId: null,
+  editingDraftJson: null,
 };
 
 state.editing.scenario = null;
@@ -3524,6 +3526,7 @@ function draftTargetLabel(targetType) {
 function draftStatusBadge(status) {
   return {
     pending_review: `<span class="badge warning">Väntar på granskning</span>`,
+    deferred: `<span class="badge muted">Uppskjuten</span>`,
     approved: `<span class="badge success">Godkänd</span>`,
     rejected: `<span class="badge muted">Avvisad</span>`,
   }[status] || `<span class="badge muted">${escapeHtml(status)}</span>`;
@@ -3534,6 +3537,8 @@ function renderDraftCard(draft) {
   const title = proposed.provider || proposed.vendor || proposed.lender || proposed.source || draftTargetLabel(draft.target_entity_type);
   const amount = proposed.amount || proposed.current_monthly_cost || proposed.net_amount || proposed.required_monthly_payment;
   const freq = proposed.frequency || proposed.billing_frequency;
+  const isEditing = state.ui.editingDraftId === draft.id;
+  const editJson = isEditing ? (state.ui.editingDraftJson ?? JSON.stringify(proposed, null, 2)) : JSON.stringify(proposed, null, 2);
   return `
     <article class="record-card">
       <div class="record-title-row">
@@ -3546,15 +3551,25 @@ function renderDraftCard(draft) {
           ${draftStatusBadge(draft.status)}
         </div>
       </div>
-      ${amount != null ? `<div class="detail-grid three fact-grid">${detailCell("Belopp", formatIngestAmount(amount, proposed.currency))}${freq ? detailCell("Frekvens", freq) : ""}${proposed.category ? detailCell("Kategori", proposed.category) : ""}</div>` : ""}
-      <div class="actions-row">
-        <button class="primary compact" type="button" data-apply-draft="${draft.id}">Applicera till kanonisk data</button>
-        <button class="danger compact" type="button" data-delete-draft="${draft.id}">Avvisa</button>
-      </div>
-      <details class="raw-json">
-        <summary>Visa rå JSON</summary>
-        <pre>${escapeHtml(JSON.stringify(proposed, null, 2))}</pre>
-      </details>
+      ${amount != null && !isEditing ? `<div class="detail-grid three fact-grid">${detailCell("Belopp", formatIngestAmount(amount, proposed.currency))}${freq ? detailCell("Frekvens", freq) : ""}${proposed.category ? detailCell("Kategori", proposed.category) : ""}</div>` : ""}
+      ${isEditing ? `
+        <div class="field full">
+          <label>Redigera förslag (JSON)</label>
+          <textarea class="draft-edit-area" name="draft_edit_json_${draft.id}" rows="8">${escapeHtml(editJson)}</textarea>
+        </div>
+        <div class="actions-row">
+          <button class="primary compact" type="button" data-action="save-draft-edit" data-draft-id="${draft.id}">Spara ändringar</button>
+          <button class="ghost compact" type="button" data-action="cancel-draft-edit">Avbryt</button>
+        </div>
+      ` : `
+        <div class="actions-row">
+          <button class="primary compact" type="button" data-apply-draft="${draft.id}">Applicera</button>
+          <button class="ghost compact" type="button" data-action="edit-draft" data-draft-id="${draft.id}">Redigera</button>
+          <button class="ghost compact" type="button" data-action="defer-draft" data-draft-id="${draft.id}">Skjut upp</button>
+          <button class="danger compact" type="button" data-delete-draft="${draft.id}">Avvisa</button>
+        </div>
+      `}
+      ${!isEditing ? `<details class="raw-json"><summary>Visa rå JSON</summary><pre>${escapeHtml(JSON.stringify(proposed, null, 2))}</pre></details>` : ""}
     </article>
   `;
 }
@@ -3906,6 +3921,59 @@ async function handlePageClick(event) {
     return;
   }
 
+  const editDraftTarget = event.target.closest("[data-action='edit-draft']");
+  if (editDraftTarget) {
+    const draftId = Number(editDraftTarget.dataset.draftId);
+    const draft = state.data.drafts.find((d) => d.id === draftId);
+    state.ui.editingDraftId = draftId;
+    state.ui.editingDraftJson = JSON.stringify(draft?.proposed_json || {}, null, 2);
+    render();
+    return;
+  }
+
+  const cancelEditTarget = event.target.closest("[data-action='cancel-draft-edit']");
+  if (cancelEditTarget) {
+    state.ui.editingDraftId = null;
+    state.ui.editingDraftJson = null;
+    render();
+    return;
+  }
+
+  const saveEditTarget = event.target.closest("[data-action='save-draft-edit']");
+  if (saveEditTarget) {
+    const draftId = Number(saveEditTarget.dataset.draftId);
+    const textarea = document.querySelector(`textarea[name="draft_edit_json_${draftId}"]`);
+    if (!textarea) return;
+    try {
+      const newJson = JSON.parse(textarea.value);
+      await request(`/extraction_drafts/${draftId}`, {
+        method: "PUT",
+        body: JSON.stringify({ proposed_json: newJson }),
+      });
+      state.ui.editingDraftId = null;
+      state.ui.editingDraftJson = null;
+      await refreshAllData();
+      render();
+      showToast("Utkastet uppdaterades.");
+    } catch (err) {
+      showToast(readError(err), "error");
+    }
+    return;
+  }
+
+  const deferDraftTarget = event.target.closest("[data-action='defer-draft']");
+  if (deferDraftTarget) {
+    const draftId = Number(deferDraftTarget.dataset.draftId);
+    await request(`/extraction_drafts/${draftId}`, {
+      method: "PUT",
+      body: JSON.stringify({ status: "deferred" }),
+    });
+    await refreshAllData();
+    render();
+    showToast("Utkastet sköts upp.");
+    return;
+  }
+
   const runScenarioTarget = event.target.closest("[data-run-scenario]");
   if (runScenarioTarget) {
     await request(`/scenarios/${Number(runScenarioTarget.dataset.runScenario)}/run`, { method: "POST" });
@@ -4011,6 +4079,8 @@ function handlePageInput(event) {
     state.ui.ingestKind = event.target.value;
   } else if (event.target.name === "ingest_source_name") {
     state.ui.ingestSourceName = event.target.value;
+  } else if (event.target.name && event.target.name.startsWith("draft_edit_json_")) {
+    state.ui.editingDraftJson = event.target.value;
   }
 }
 

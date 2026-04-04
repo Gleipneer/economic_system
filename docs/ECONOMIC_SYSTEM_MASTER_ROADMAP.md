@@ -59,8 +59,8 @@ underlag
 - [x] bank_row_batch
 - [x] financial_note
 - [x] unclear
-- [ ] insurance_policy (tillägg behövs i AI-schema)
-- [ ] loan_or_credit (tillägg behövs i AI-schema)
+- [x] insurance_policy
+- [x] loan_or_credit
 
 ### 1.3 Fältextraktion
 - [x] provider_name
@@ -85,9 +85,9 @@ underlag
 - [x] ExtractionDraft med pending_review status
 - [x] Applicera (apply) knapp per utkast
 - [x] Avvisa (delete) knapp per utkast
-- [ ] Redigera utkast innan apply
-- [ ] Skjut upp (defer) funktion
-- [ ] Bättre visuell status per utkast (confidence badge, typ-label)
+- [x] Bättre visuell status per utkast (confidence badge, typ-label, belopp)
+- [x] Redigera utkast inline innan apply (JSON-editor med spara/avbryt)
+- [x] Skjut upp (defer) funktion (sätter status till deferred)
 
 ### 1.6 LF Bank Copy-Paste
 - [x] bank_paste source channel
@@ -95,6 +95,14 @@ underlag
 - [x] Review-buckets: recurring, subscription, transfer_or_saving, unclear
 - [x] Högre max_output_tokens (1400) för batchsvar
 - [x] Live-testat med LF-format
+
+### 1.7 Bank-Ready PDF Export
+- [x] reportlab-baserad PDF-generering (app/pdf_export.py)
+- [x] GET /households/{id}/export/bank_pdf endpoint
+- [x] Professionell svensk layout: personer, inkomster, kostnader, lån, boendekalkyl, tillgångar
+- [x] Knapp på rapportsidan
+- [x] Datumstämpel och källstatusnotering
+- [x] Test: test_bank_pdf_export_generates_valid_pdf
 
 ---
 
