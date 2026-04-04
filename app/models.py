@@ -378,6 +378,7 @@ class ExtractionDraft(Base):
     canonical_target_entity_type = Column(String, nullable=True)
     canonical_target_entity_id = Column(Integer, nullable=True)
     review_error = Column(Text, nullable=True)
+    apply_summary_json = Column(JSON, nullable=True)
     applied_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     # Relationships

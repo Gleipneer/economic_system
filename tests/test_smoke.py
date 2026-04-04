@@ -15,10 +15,13 @@ def load_app(tmp_path):
     db_path = tmp_path / "test.db"
     os.environ["DATABASE_URL"] = f"sqlite:///{db_path}"
     os.environ["UPLOAD_DIR"] = str(tmp_path / "uploads")
+    os.environ["AUTO_CREATE_SCHEMA"] = "true"
     os.environ["OPENAI_API_KEY"] = ""
     os.environ["OPENAI_ANALYSIS_MODEL"] = ""
     os.environ["OPENAI_INGEST_MODEL"] = ""
 
+    import app.settings as settings
+    settings.get_settings.cache_clear()
     import app.database as database
     import app.models as models
     import app.schemas as schemas
@@ -1127,6 +1130,8 @@ def test_document_review_flow_for_loan_invoice_upload_and_apply(tmp_path):
 
 def test_draft_can_link_document_to_existing_loan(tmp_path):
     app = load_app(tmp_path)
+    from app import ai_services, database
+
     with TestClient(app) as client:
         ids = create_household_fixture(client)
         household_id = ids["household_id"]
@@ -1202,6 +1207,272 @@ def test_draft_can_link_document_to_existing_loan(tmp_path):
         payload = review.json()
         assert payload["workflow_status"] == "applied"
         assert payload["canonical_links"][0]["target_entity_id"] == loan_id
+
+        db = database.SessionLocal()
+        try:
+            context = ai_services._compact_household_context(db, household_id)
+        finally:
+            db.close()
+
+        loan_context = next(item for item in context["loans"] if item["lender"] == "Volvofinans")
+        assert loan_context["monthly_payment"] == 3990
+        assert loan_context["current_balance"] == 120000
+        assert context["document_counts"]["drafts_pending_review"] == 0
+
+
+def test_document_review_flow_tracks_status_and_applies_santander_kia_loan_exactly(tmp_path):
+    app = load_app(tmp_path)
+    from app import ai_services, database
+
+    with TestClient(app) as client:
+        ids = create_household_fixture(client)
+        household_id = ids["household_id"]
+
+        upload = client.post(
+            "/documents/upload",
+            data={"household_id": str(household_id), "document_type": "loan_statement", "issuer": "Santander Consumer Bank"},
+            files={
+                "file": (
+                    "santander_kia.txt",
+                    io.BytesIO(
+                        (
+                            "Santander Consumer Bank billåneavi\n"
+                            "Dokumenttyp: Billånefaktura\n"
+                            "Långivare: Santander Consumer Bank\n"
+                            "Objekt: Kia\n"
+                            "Faktureringsdatum: 2026-03-09\n"
+                            "Förfallodatum: 2026-03-31\n"
+                            "Att betala: 2 221 kr\n"
+                            "Ränta: 2,60 %\n"
+                            "Skuld före amortering: 188 979 kr\n"
+                            "Amortering: 1 762 kr\n"
+                            "Räntekostnad: 409 kr\n"
+                            "Administrationsavgift: 49 kr\n"
+                            "Kontraktsnummer: SANT-2026-03\n"
+                        ).encode("utf-8")
+                    ),
+                    "text/plain",
+                )
+            },
+        )
+        assert upload.status_code == 201
+        document_id = upload.json()["id"]
+        assert upload.json()["extraction_status"] == "interpreted"
+
+        review_before = client.get(f"/documents/{document_id}/review")
+        assert review_before.status_code == 200
+        before_payload = review_before.json()
+        assert before_payload["workflow_status"] == "interpreted"
+        assert before_payload["status_detail"] == "Dokumentet har tolkats men inte blivit reviewutkast ännu."
+
+        draft = client.post(
+            "/extraction_drafts",
+            json={
+                "household_id": household_id,
+                "document_id": document_id,
+                "target_entity_type": "loan",
+                "proposed_json": {
+                    "household_id": household_id,
+                    "type": "car",
+                    "lender": "Santander Consumer Bank",
+                    "required_monthly_payment": 2221,
+                    "current_balance": 188979,
+                    "nominal_rate": 2.6,
+                    "amortization_amount_monthly": 1762,
+                    "purpose": "Kia",
+                    "status": "active",
+                },
+                "review_json": {
+                    "lender": "Santander Consumer Bank",
+                    "interest_rate": 2.6,
+                    "debt_before_amortization": 188979,
+                    "payment_amount": 2221,
+                    "payment_due_date": "2026-03-31",
+                    "object_vehicle": "Kia",
+                    "contract_number": "SANT-2026-03",
+                    "amortization": 1762,
+                    "interest_cost": 409,
+                    "fees": 49,
+                },
+                "status": "pending_review",
+            },
+        )
+        assert draft.status_code == 201
+        draft_id = draft.json()["id"]
+
+        review_pending = client.get(f"/documents/{document_id}/review")
+        assert review_pending.status_code == 200
+        pending_payload = review_pending.json()
+        assert pending_payload["workflow_status"] == "pending_review"
+        labels = {item["label"]: item["value"] for item in pending_payload["key_fields"]}
+        assert labels["Långivare"] == "Santander Consumer Bank"
+        assert labels["Objekt / bil"] == "Kia"
+        assert labels["Ränta"] == "2.6"
+        assert labels["Skuld före amortering"] == "188979"
+        assert labels["Belopp att betala"] == "2221"
+        assert labels["Amortering"] == "1762"
+        assert labels["Räntekostnad"] == "409"
+        assert labels["Avgifter"] == "49"
+
+        apply_response = client.post(f"/extraction_drafts/{draft_id}/apply", json={"action": "create_new"})
+        assert apply_response.status_code == 200
+        loan_id = apply_response.json()["target_entity_id"]
+
+        loan = client.get(f"/loans/{loan_id}")
+        assert loan.status_code == 200
+        loan_payload = loan.json()
+        assert loan_payload["lender"] == "Santander Consumer Bank"
+        assert loan_payload["purpose"] == "Kia"
+        assert loan_payload["current_balance"] == 188979
+        assert loan_payload["required_monthly_payment"] == 2221
+        assert loan_payload["nominal_rate"] == 2.6
+        assert loan_payload["amortization_amount_monthly"] == 1762
+        assert loan_payload["due_day"] == 31
+        assert loan_payload["statement_doc_id"] == document_id
+        assert "SANT-2026-03" in (loan_payload["note"] or "")
+
+        review_after = client.get(f"/documents/{document_id}/review")
+        assert review_after.status_code == 200
+        after_payload = review_after.json()
+        assert after_payload["workflow_status"] == "applied"
+        assert after_payload["canonical_links"][0]["target_entity_type"] == "loan"
+        assert after_payload["canonical_links"][0]["target_entity_id"] == loan_id
+
+        db = database.SessionLocal()
+        try:
+            context = ai_services._compact_household_context(db, household_id)
+        finally:
+            db.close()
+
+        assert context["document_counts"]["drafts_pending_review"] == 0
+        santander_loan = next(item for item in context["loans"] if item["lender"] == "Santander Consumer Bank")
+        assert santander_loan["monthly_payment"] == 2221
+        assert santander_loan["current_balance"] == 188979
+
+
+def test_document_package_apply_creates_loan_and_vehicle_and_updates_assistant_context(tmp_path):
+    app = load_app(tmp_path)
+    from app import ai_services, database
+
+    with TestClient(app) as client:
+        ids = create_household_fixture(client)
+        household_id = ids["household_id"]
+
+        upload = client.post(
+            "/documents/upload",
+            data={"household_id": str(household_id), "document_type": "loan_statement", "issuer": "Santander Consumer Bank"},
+            files={
+                "file": (
+                    "santander_kia.txt",
+                    io.BytesIO(
+                        (
+                            "Santander Consumer Bank billåneavi\n"
+                            "Dokumenttyp: Billånefaktura\n"
+                            "Långivare: Santander Consumer Bank\n"
+                            "Objekt: Kia\n"
+                            "Faktureringsdatum: 2026-03-09\n"
+                            "Förfallodatum: 2026-03-31\n"
+                            "Att betala: 2 221 kr\n"
+                            "Ränta: 2,60 %\n"
+                            "Skuld före amortering: 188 979 kr\n"
+                            "Amortering: 1 762 kr\n"
+                            "Räntekostnad: 409 kr\n"
+                            "Administrationsavgift: 49 kr\n"
+                            "Kontraktsnummer: SANT-2026-03\n"
+                        ).encode("utf-8")
+                    ),
+                    "text/plain",
+                )
+            },
+        )
+        assert upload.status_code == 201
+        document_id = upload.json()["id"]
+
+        draft = client.post(
+            "/extraction_drafts",
+            json={
+                "household_id": household_id,
+                "document_id": document_id,
+                "target_entity_type": "loan",
+                "proposed_json": {
+                    "household_id": household_id,
+                    "type": "car",
+                    "lender": "Santander Consumer Bank",
+                    "required_monthly_payment": 2221,
+                    "current_balance": 188979,
+                    "nominal_rate": 2.6,
+                    "amortization_amount_monthly": 1762,
+                    "purpose": "Kia",
+                    "status": "active",
+                },
+                "review_json": {
+                    "lender": "Santander Consumer Bank",
+                    "interest_rate": 2.6,
+                    "debt_before_amortization": 188979,
+                    "payment_amount": 2221,
+                    "payment_due_date": "2026-03-31",
+                    "object_vehicle": "Kia",
+                    "contract_number": "SANT-2026-03",
+                    "amortization": 1762,
+                    "interest_cost": 409,
+                    "fees": 49,
+                },
+                "status": "pending_review",
+            },
+        )
+        assert draft.status_code == 201
+        draft_id = draft.json()["id"]
+
+        apply_response = client.post(
+            f"/documents/{document_id}/apply",
+            json={
+                "draft_ids": [draft_id],
+                "draft_actions": [{"draft_id": draft_id, "action": "create_new"}],
+                "related_actions": [{"source_draft_id": draft_id, "entity_type": "vehicle", "action": "create_new"}],
+            },
+        )
+        assert apply_response.status_code == 200
+        payload = apply_response.json()
+        assert payload["workflow_status"] == "applied"
+        assert payload["apply_summary"]["status"] == "applied"
+        mutation_types = {(item["entity_type"], item["action"]) for item in payload["apply_summary"]["mutations"]}
+        assert ("loan", "created") in mutation_types
+        assert ("vehicle", "created") in mutation_types
+
+        loan_link = next(item for item in payload["workflow"]["canonical_links"] if item["target_entity_type"] == "loan")
+        vehicle_link = next(item for item in payload["workflow"]["canonical_links"] if item["target_entity_type"] == "vehicle")
+
+        loan = client.get(f"/loans/{loan_link['target_entity_id']}")
+        vehicle = client.get(f"/vehicles/{vehicle_link['target_entity_id']}")
+        assert loan.status_code == 200
+        assert vehicle.status_code == 200
+        assert loan.json()["lender"] == "Santander Consumer Bank"
+        assert loan.json()["purpose"] == "Kia"
+        assert loan.json()["current_balance"] == 188979
+        assert loan.json()["required_monthly_payment"] == 2221
+        assert loan.json()["nominal_rate"] == 2.6
+        assert loan.json()["amortization_amount_monthly"] == 1762
+        assert vehicle.json()["loan_id"] == loan_link["target_entity_id"]
+        assert vehicle.json()["make"] == "Kia"
+
+        db = database.SessionLocal()
+        try:
+            context = ai_services._compact_household_context(db, household_id)
+        finally:
+            db.close()
+
+        santander_loan = next(item for item in context["loans"] if item["lender"] == "Santander Consumer Bank")
+        assert santander_loan["monthly_payment"] == 2221
+        assert santander_loan["current_balance"] == 188979
+        assert santander_loan["nominal_rate"] == 2.6
+        assert santander_loan["linked_vehicle"] == "Kia"
+        assert santander_loan["linked_vehicle_id"] == vehicle_link["target_entity_id"]
+        assert santander_loan["linked_vehicle_summary"]["loan_id"] == loan_link["target_entity_id"]
+
+        kia_vehicle = next(item for item in context["vehicles"] if item["id"] == vehicle_link["target_entity_id"])
+        assert kia_vehicle["label"] == "Kia"
+        assert kia_vehicle["loan_id"] == loan_link["target_entity_id"]
+        assert context["document_counts"]["drafts_pending_review"] == 0
 
 
 def test_assistant_context_excludes_pending_document_review_values(tmp_path):

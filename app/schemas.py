@@ -544,6 +544,7 @@ class ExtractionDraftBase(BaseModel):
     canonical_target_entity_type: Optional[str] = None
     canonical_target_entity_id: Optional[int] = None
     review_error: Optional[str] = None
+    apply_summary_json: Optional[Any] = None
 
 
 class ExtractionDraftCreate(ExtractionDraftBase):
@@ -562,6 +563,7 @@ class ExtractionDraftUpdate(ExtractionDraftBase):
     canonical_target_entity_type: Optional[str] = None
     canonical_target_entity_id: Optional[int] = None
     review_error: Optional[str] = None
+    apply_summary_json: Optional[Any] = None
 
 
 class ExtractionDraftRead(ExtractionDraftBase):
@@ -588,13 +590,73 @@ class CanonicalLinkRead(BaseModel):
     applied_at: Optional[datetime] = None
 
 
+class DocumentEntityResolutionCandidateRead(BaseModel):
+    entity_type: Literal["loan", "vehicle"]
+    entity_id: Optional[int] = None
+    label: str
+    confidence: Optional[confloat(ge=0.0, le=1.0)] = None
+    reason: Optional[str] = None
+    recommended_action: Literal["link_existing", "create_new", "manual_review", "skip"] = "manual_review"
+
+
+class DocumentEntityResolutionRead(BaseModel):
+    draft_id: int
+    primary_entity_type: Literal["loan", "vehicle", "subscription_contract", "recurring_cost", "income_source"]
+    recommended_action: Literal["link_existing", "create_new", "manual_review", "skip"] = "manual_review"
+    confidence: Optional[confloat(ge=0.0, le=1.0)] = None
+    reason: Optional[str] = None
+    loan_candidates: List[DocumentEntityResolutionCandidateRead] = Field(default_factory=list)
+    vehicle_candidates: List[DocumentEntityResolutionCandidateRead] = Field(default_factory=list)
+
+
+class DocumentApplyMutationRead(BaseModel):
+    entity_type: Literal["loan", "vehicle", "draft"]
+    action: Literal["created", "updated", "linked", "skipped", "manual_review"]
+    entity_id: Optional[int] = None
+    label: str
+    summary_sv: str
+
+
+class DocumentApplySummaryRead(BaseModel):
+    document_id: int
+    draft_id: Optional[int] = None
+    status: Literal["applied", "partial", "manual_review", "failed"]
+    message_sv: str
+    manual_actions_required: List[str] = Field(default_factory=list)
+    mutations: List[DocumentApplyMutationRead] = Field(default_factory=list)
+    applied_at: datetime
+
+
+class DocumentWorkflowStepRead(BaseModel):
+    key: str
+    label_sv: str
+    active: bool = False
+    completed: bool = False
+
+
 class DocumentWorkflowRead(BaseModel):
     document: DocumentRead
-    workflow_status: Literal["uploaded", "interpreted", "pending_review", "applied", "failed"]
+    workflow_status: Literal[
+        "uploaded",
+        "interpreting",
+        "interpreted",
+        "pending_review",
+        "applied",
+        "failed",
+        "rejected",
+        "manual_link_required",
+        "deferred",
+    ]
     status_detail: Optional[str] = None
+    status_label_sv: Optional[str] = None
+    status_steps: List[DocumentWorkflowStepRead] = Field(default_factory=list)
     drafts: List[ExtractionDraftRead] = Field(default_factory=list)
     key_fields: List[DocumentKeyFieldRead] = Field(default_factory=list)
     canonical_links: List[CanonicalLinkRead] = Field(default_factory=list)
+    entity_resolutions: List[DocumentEntityResolutionRead] = Field(default_factory=list)
+    apply_summary: Optional[DocumentApplySummaryRead] = None
+    recommended_actions: List[str] = Field(default_factory=list)
+    requires_manual_link: bool = False
 
 
 class ExtractionDraftApplyRequest(BaseModel):
@@ -609,6 +671,65 @@ class ExtractionDraftApplyRequest(BaseModel):
         if action == "link_existing" and target_entity_id is None:
             raise ValueError("Skicka target_entity_id när draft ska kopplas till befintligt objekt.")
         return values
+
+
+class DocumentDraftApplySelection(BaseModel):
+    draft_id: int
+    action: Literal["create_new", "link_existing", "skip"] = "create_new"
+    target_entity_id: Optional[int] = None
+    proposed_json: Optional[Dict[str, Any]] = None
+
+    @root_validator(allow_reuse=True)
+    def validate_selection(cls, values):
+        action = values.get("action")
+        target_entity_id = values.get("target_entity_id")
+        if action == "link_existing" and target_entity_id is None:
+            raise ValueError("Skicka target_entity_id när ett utkast ska kopplas till befintligt objekt.")
+        return values
+
+
+class RelatedEntityApplySelection(BaseModel):
+    source_draft_id: int
+    entity_type: Literal["vehicle"]
+    action: Literal["create_new", "link_existing", "skip"] = "skip"
+    target_entity_id: Optional[int] = None
+    proposed_json: Optional[Dict[str, Any]] = None
+
+    @root_validator(allow_reuse=True)
+    def validate_related_selection(cls, values):
+        action = values.get("action")
+        target_entity_id = values.get("target_entity_id")
+        if action == "link_existing" and target_entity_id is None:
+            raise ValueError("Skicka target_entity_id när en relaterad koppling ska länkas till befintligt objekt.")
+        return values
+
+
+class DocumentApplyRequest(BaseModel):
+    draft_ids: Optional[List[int]] = None
+    action: Literal["create_new", "link_existing"] = "create_new"
+    target_entity_id: Optional[int] = None
+    proposed_json: Optional[Dict[str, Any]] = None
+    draft_actions: List[DocumentDraftApplySelection] = Field(default_factory=list)
+    related_actions: List[RelatedEntityApplySelection] = Field(default_factory=list)
+
+    @root_validator(allow_reuse=True)
+    def validate_document_apply(cls, values):
+        action = values.get("action")
+        target_entity_id = values.get("target_entity_id")
+        draft_actions = values.get("draft_actions") or []
+        if draft_actions:
+            return values
+        if action == "link_existing" and target_entity_id is None:
+            raise ValueError("Skicka target_entity_id när dokumentet ska kopplas till befintligt objekt.")
+        return values
+
+
+class DocumentApplyResponse(BaseModel):
+    document_id: int
+    workflow_status: str
+    status_label_sv: Optional[str] = None
+    apply_summary: DocumentApplySummaryRead
+    workflow: DocumentWorkflowRead
 
 
 # -------- OptimizationOpportunity --------
@@ -798,6 +919,12 @@ class ExtractionApplyRead(BaseModel):
     target_entity_type: str
     target_entity_id: int
     status: str
+    summary: Optional[str] = None
+    applied_entities: List[Dict[str, Any]] = Field(default_factory=list)
+    manual_actions_required: List[str] = Field(default_factory=list)
+    summary: Optional[str] = None
+    applied_entities: List[DocumentApplyMutationRead] = Field(default_factory=list)
+    manual_actions_required: List[str] = Field(default_factory=list)
 
 
 class AssistantMessageRead(BaseModel):

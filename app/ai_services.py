@@ -197,10 +197,38 @@ def _person_map(records: dict[str, list[dict[str, Any]]]) -> dict[int, str]:
     return {int(item["id"]): item["name"] for item in records["persons"] if item.get("id") is not None}
 
 
+def _prioritized_loans(records: dict[str, list[dict[str, Any]]]) -> list[dict[str, Any]]:
+    return sorted(
+        records["loans"],
+        key=lambda item: (
+            1 if item.get("statement_doc_id") else 0,
+            calculations.estimate_loan_monthly_payment(item),
+        ),
+        reverse=True,
+    )
+
+
+def _prioritized_vehicles(
+    records: dict[str, list[dict[str, Any]]],
+    prioritized_loan_ids: set[int],
+) -> list[dict[str, Any]]:
+    return sorted(
+        records["vehicles"],
+        key=lambda item: (
+            1 if item.get("loan_id") in prioritized_loan_ids else 0,
+            calculations.estimate_vehicle_monthly_cost(item),
+        ),
+        reverse=True,
+    )
+
+
 def _compact_household_context(db: Session, household_id: int) -> dict[str, Any]:
     records = calculations.load_household_records(db, household_id)
     summary = calculations.build_household_summary(records, household_id)
     people = _person_map(records)
+    vehicles_by_loan_id = {
+        item.get("loan_id"): item for item in records["vehicles"] if item.get("loan_id") is not None
+    }
 
     recurring_costs = sorted(
         records["recurring_costs"],
@@ -212,7 +240,11 @@ def _compact_household_context(db: Session, household_id: int) -> dict[str, Any]
         key=lambda item: calculations.amount_to_monthly(item.get("current_monthly_cost"), item.get("billing_frequency")),
         reverse=True,
     )[:8]
-    loans = sorted(records["loans"], key=calculations.estimate_loan_monthly_payment, reverse=True)[:6]
+    prioritized_loans = _prioritized_loans(records)
+    loans = prioritized_loans[:8]
+    prioritized_loan_ids = {int(item["id"]) for item in loans if item.get("id") is not None}
+    prioritized_vehicles = _prioritized_vehicles(records, prioritized_loan_ids)
+    vehicles = prioritized_vehicles[:10]
     opportunities = sorted(
         records["optimization_opportunities"],
         key=lambda item: float(item.get("estimated_monthly_saving") or 0.0),
@@ -251,12 +283,42 @@ def _compact_household_context(db: Session, household_id: int) -> dict[str, Any]
         }
 
     def loan_item(item: dict[str, Any]) -> dict[str, Any]:
+        linked_vehicle = vehicles_by_loan_id.get(item.get("id"))
+        linked_vehicle_label = (
+            " ".join(part for part in [linked_vehicle.get("make"), linked_vehicle.get("model")] if part)
+            if linked_vehicle
+            else None
+        )
         return {
+            "id": item.get("id"),
             "lender": item.get("lender"),
             "purpose": item.get("purpose"),
             "monthly_payment": round(calculations.estimate_loan_monthly_payment(item), 2),
             "current_balance": item.get("current_balance"),
+            "nominal_rate": item.get("nominal_rate"),
+            "amortization_amount_monthly": item.get("amortization_amount_monthly"),
+            "due_day": item.get("due_day"),
             "remaining_term_months": item.get("remaining_term_months"),
+            "linked_vehicle_id": linked_vehicle.get("id") if linked_vehicle else None,
+            "linked_vehicle": linked_vehicle_label,
+            "linked_vehicle_summary": (
+                {
+                    "id": linked_vehicle.get("id"),
+                    "label": linked_vehicle_label or "Fordon",
+                    "loan_id": linked_vehicle.get("loan_id"),
+                }
+                if linked_vehicle
+                else None
+            ),
+        }
+
+    def vehicle_item(item: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "id": item.get("id"),
+            "label": " ".join(part for part in [item.get("make"), item.get("model")] if part) or "Fordon",
+            "owner": people.get(item.get("owner_person_id")),
+            "loan_id": item.get("loan_id"),
+            "monthly_cost": round(calculations.estimate_vehicle_monthly_cost(item), 2),
         }
 
     return {
@@ -265,6 +327,7 @@ def _compact_household_context(db: Session, household_id: int) -> dict[str, Any]
         "recurring_costs": [recurring_item(item) for item in recurring_costs],
         "subscriptions": [subscription_item(item) for item in subscriptions],
         "loans": [loan_item(item) for item in loans],
+        "vehicles": [vehicle_item(item) for item in vehicles],
         "opportunities": [
             {
                 "title": item.get("title"),

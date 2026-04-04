@@ -673,6 +673,20 @@ textarea {
   gap: 18px;
 }
 
+.document-hero {
+  align-items: start;
+}
+
+.document-primary-panel,
+.document-workbench-panel {
+  display: grid;
+  gap: 18px;
+}
+
+.document-primary-panel .form-grid {
+  gap: 12px;
+}
+
 .upload-box {
   border: 2px dashed var(--border);
   border-radius: 18px;
@@ -681,8 +695,104 @@ textarea {
   background: rgba(255, 255, 255, 0.32);
 }
 
+.upload-box-compact {
+  padding: 18px;
+}
+
 .upload-box input[type="file"] {
   margin-top: 14px;
+}
+
+.upload-actions {
+  justify-content: flex-start;
+}
+
+.document-preview-card {
+  display: grid;
+  gap: 14px;
+  padding: 18px;
+  border: 1px solid var(--border-soft);
+  border-radius: 20px;
+  background: rgba(255, 255, 255, 0.48);
+  box-shadow: var(--shadow-card);
+}
+
+.document-preview-large {
+  width: 100%;
+  min-height: 320px;
+  border: 1px solid var(--border-soft);
+  border-radius: 18px;
+  background: #fff;
+}
+
+.document-preview-image {
+  object-fit: contain;
+}
+
+.document-preview-frame {
+  border: 0;
+}
+
+.document-status-rail {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.status-chip {
+  padding: 8px 11px;
+  border-radius: 999px;
+  border: 1px solid var(--border-soft);
+  background: rgba(255, 255, 255, 0.6);
+  color: var(--muted);
+  font-size: 0.74rem;
+  font-weight: 700;
+}
+
+.status-chip.active.success {
+  background: var(--success-soft);
+  color: var(--success);
+  border-color: rgba(94, 141, 98, 0.16);
+}
+
+.status-chip.active.warning {
+  background: var(--warning-soft);
+  color: #946c31;
+  border-color: rgba(195, 146, 79, 0.18);
+}
+
+.status-chip.active.danger {
+  background: var(--danger-soft);
+  color: var(--danger);
+  border-color: rgba(187, 111, 97, 0.18);
+}
+
+.status-chip.active.muted,
+.status-chip.active.info {
+  background: var(--primary-soft);
+  color: #4e726c;
+  border-color: rgba(111, 148, 141, 0.16);
+}
+
+.document-summary-stack,
+.document-summary-grid,
+.document-match-list {
+  display: grid;
+  gap: 14px;
+}
+
+.document-summary-grid .detail-item {
+  min-height: 74px;
+}
+
+.document-apply-summary {
+  margin-top: 2px;
+}
+
+.document-inbox-card.is-active,
+.document-draft-card.is-active {
+  border-color: rgba(111, 148, 141, 0.38);
+  box-shadow: var(--shadow-hover);
 }
 
 .chat-shell {

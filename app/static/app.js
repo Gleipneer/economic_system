@@ -1280,17 +1280,23 @@ function renderHousingCard(item) {
 
 function renderDocumentCard(item) {
   return `
-    <article class="record-card">
-      <div class="record-header">
+    <article class="record-card document-inbox-card ${state.ui.selectedDocumentId === item.id ? "is-active" : ""}">
+      <div class="record-title-row">
         <div>
           <h4 class="record-title">${escapeHtml(item.file_name)}</h4>
-          <p class="meta-text">${optionLabel(OPTIONS.documentType, item.document_type)}${item.issuer ? ` · ${escapeHtml(item.issuer)}` : ""}</p>
+          <p class="muted">${escapeHtml(optionLabel(OPTIONS.documentType, item.document_type))}${item.issuer ? ` · ${escapeHtml(item.issuer)}` : ""}</p>
         </div>
-        <a class="download-link" href="/documents/${item.id}/download">Ladda ned</a>
+        <span class="badge ${documentExtractionMeta(item.extraction_status).tone}">${documentExtractionMeta(item.extraction_status).label}</span>
       </div>
+      <p class="muted">${item.extracted_text ? escapeHtml(item.extracted_text.trim().slice(0, 130)) : "Ingen extraherad text ännu."}</p>
       <div class="badge-row">
-        <span class="badge">${dateLabel(item.uploaded_at)}</span>
-        <span class="badge muted">${escapeHtml(item.extraction_status || "pending")}</span>
+        <span class="badge muted">${dateLabel(item.uploaded_at)}</span>
+        ${item.processing_error ? `<span class="badge danger">Fel i tolkning</span>` : ""}
+      </div>
+      <div class="actions-row">
+        <button class="primary compact" type="button" data-action="select-document" data-document-id="${item.id}">Öppna</button>
+        <button class="ghost compact" type="button" data-action="analyze-document" data-document-id="${item.id}" ${item.extracted_text ? "" : "disabled"}>Tolka igen</button>
+        <a class="ghost compact" href="/documents/${item.id}/download">Ladda ned</a>
       </div>
     </article>
   `;
@@ -1487,27 +1493,59 @@ function renderAssetFormBlock() {
 function renderDocumentUploadForm() {
   return `
     <form id="documentUploadForm" class="form-grid">
-      ${renderField({ key: "document_type", label: "Typ av dokument", type: "select", options: OPTIONS.documentType, required: true })}
-      ${renderField({ key: "issuer", label: "Avsändare eller leverantör", type: "text", placeholder: "Till exempel banken eller Tele2" })}
-      ${renderField({ key: "currency", label: "Valuta", type: "text", placeholder: "SEK", default: "SEK" })}
+      ${renderField({ key: "document_type", label: "Dokumenttyp", type: "select", options: OPTIONS.documentType, required: true }, state.ui.ingestResult?.document_summary?.document_type || "invoice")}
+      ${renderField({ key: "issuer", label: "Avsändare eller leverantör", type: "text", placeholder: "Till exempel banken eller Tele2" }, state.ui.ingestSourceName || "")}
+      ${renderField({ key: "currency", label: "Valuta", type: "text", placeholder: "SEK", default: "SEK" }, "SEK")}
       <div class="field full">
-        <label for="document_file">Välj fil</label>
-        <div class="upload-drop">
-          <input id="document_file" name="file" type="file" required />
+        <label for="document_file">Ladda upp PDF, bild eller foto</label>
+        <div class="upload-box upload-box-compact">
+          <input id="document_file" name="file" type="file" accept="image/*,application/pdf" capture="environment" required />
+          <p class="helper-text">Fotografera dokumentet med mobilen eller välj en PDF. Förhandsvisning visas direkt när filen valts.</p>
         </div>
-        <p class="helper-text">Backend försöker extrahera text ur uppladdade PDF:er och dokument där det går. Bild- och screenshot-avläsning är förberedd i gränssnittet men inte implementerad ännu.</p>
       </div>
       <div class="field full">
         <label for="document_extracted_text">Valfri notis</label>
-        <textarea id="document_extracted_text" name="extracted_text" placeholder="Till exempel vad dokumentet gäller eller vilken period det avser."></textarea>
-        <p class="helper-text">Det här är bara en notis. När text kan extraheras ska den komma från filen, inte från en manuell tolkning här.</p>
+        <textarea id="document_extracted_text" name="extracted_text" placeholder="Om du vill kan du lägga till en kort notis, men den extraherade texten ska komma från filen."></textarea>
       </div>
       <div class="field full">
-        <div class="form-actions">
-          <button class="primary" type="submit">Ladda upp dokument</button>
+        <div class="form-actions upload-actions">
+          <button class="primary" type="submit">Ladda upp och tolka</button>
+          <button class="ghost" type="button" data-action="clear-ingest">Rensa</button>
         </div>
       </div>
+      <div id="documentUploadPreviewSlot" class="field full">
+        ${renderDocumentUploadPreview()}
+      </div>
     </form>
+  `;
+}
+
+function renderDocumentUploadPreview() {
+  const preview = state.ui.documentUploadPreview;
+  if (!preview) {
+    return `
+      <article class="workflow-callout subtle">
+        <strong>Förhandsvisning</strong>
+        <p class="muted">När du väljer en fil visas den här direkt. Det gör att du ser att du valde rätt dokument innan du laddar upp det.</p>
+      </article>
+    `;
+  }
+
+  return `
+    <article class="document-preview-card">
+      <div class="record-title-row">
+        <div>
+          <h4 class="record-title">${escapeHtml(preview.name)}</h4>
+          <p class="muted">${preview.category === "image" ? "Bild / foto" : preview.category === "pdf" ? "PDF" : "Fil"}${preview.size ? ` · ${number(preview.size / 1024, 0)} KB` : ""}</p>
+        </div>
+        <span class="badge info">Vald lokalt</span>
+      </div>
+      ${preview.category === "image"
+        ? `<img class="document-preview-image" src="${escapeHtml(preview.objectUrl)}" alt="Förhandsvisning av vald fil" />`
+        : preview.category === "pdf"
+          ? `<iframe class="document-preview-frame" src="${escapeHtml(preview.objectUrl)}" title="Förhandsvisning av vald PDF"></iframe>`
+          : `<p class="muted">Den här filtypen förhandsvisas efter uppladdning.</p>`}
+    </article>
   `;
 }
 
@@ -2104,6 +2142,8 @@ async function uploadDocument(form) {
   formData.set("household_id", String(state.selectedHouseholdId));
   const document = await request("/documents/upload", { method: "POST", body: formData, headers: {} });
   form.reset();
+  clearDocumentUploadPreview();
+  state.ui.documentApplySummary = null;
   await refreshAllData();
   state.ui.selectedDocumentId = document.id;
   await loadSelectedDocumentWorkflow(document.id);
@@ -2231,7 +2271,11 @@ state.ui = {
   openReportId: null,
   selectedDocumentId: null,
   selectedDocumentWorkflow: null,
+  documentDraftSelections: {},
+  documentApplyPending: false,
   documentLinkLoanId: "",
+  documentUploadPreview: null,
+  documentApplySummary: null,
   assistantMessages: [],
   assistantInput: "",
   assistantPending: false,
@@ -2300,10 +2344,15 @@ function bindBaseEvents() {
     state.selectedHouseholdId = Number(event.target.value) || null;
     persistSelection();
     clearEdits();
+    clearDocumentUploadPreview();
+    state.ui.documentApplySummary = null;
     state.ui.assistantMessages = [];
     state.ui.ingestInput = "";
     state.ui.ingestDocumentId = null;
     state.ui.ingestResult = null;
+    state.ui.documentDraftSelections = {};
+    state.ui.selectedDocumentWorkflow = null;
+    state.ui.documentApplySummary = null;
     await ensureSummaryLoaded();
     render();
   });
@@ -2371,6 +2420,7 @@ async function refreshAllData() {
   }
   if (!state.ui.selectedDocumentId && visibleDocumentIds.length) {
     state.ui.selectedDocumentId = visibleDocumentIds[0];
+    state.ui.documentApplySummary = null;
   }
   await loadSelectedDocumentWorkflow();
 }
@@ -3332,8 +3382,225 @@ function documentExtractionMeta(status) {
     interpreted: { tone: "success", label: "Tolkad" },
     pending_review: { tone: "warning", label: "Väntar granskning" },
     applied: { tone: "success", label: "Applicerad" },
+    deferred: { tone: "muted", label: "Skjuten upp" },
+    rejected: { tone: "muted", label: "Avvisad" },
     failed: { tone: "danger", label: "Misslyckad" },
   }[status || "uploaded"] || { tone: "muted", label: status || "uploaded" };
+}
+
+function documentWorkflowStatusLabel(status) {
+  return {
+    uploaded: "Uppladdad",
+    interpreted: "Tolkad",
+    pending_review: "Väntar på granskning",
+    applied: "Applicerad",
+    failed: "Misslyckad",
+    deferred: "Skjuten upp",
+    rejected: "Avvisad",
+    approved: "Godkänd",
+    apply_failed: "Misslyckad",
+    manual_link: "Kräver manuell koppling",
+    manual_link_required: "Kräver manuell koppling",
+  }[status || "uploaded"] || status || "Uppladdad";
+}
+
+function documentWorkflowStatusTone(status) {
+  return {
+    uploaded: "muted",
+    interpreted: "success",
+    pending_review: "warning",
+    applied: "success",
+    failed: "danger",
+    deferred: "muted",
+    rejected: "muted",
+    approved: "success",
+    apply_failed: "danger",
+    manual_link: "info",
+    manual_link_required: "info",
+  }[status || "uploaded"] || "muted";
+}
+
+function documentPreviewUrl(document) {
+  return document ? `/documents/${document.id}/download` : "";
+}
+
+function documentMimeCategory(document) {
+  const mimeType = String(document?.mime_type || "").toLowerCase();
+  if (mimeType.startsWith("image/")) return "image";
+  if (mimeType === "application/pdf") return "pdf";
+  return "file";
+}
+
+function documentUploadMeta(file) {
+  if (!file) return null;
+  return {
+    name: file.name,
+    size: file.size,
+    type: file.type,
+    category: file.type.startsWith("image/") ? "image" : file.type === "application/pdf" ? "pdf" : "file",
+    objectUrl: URL.createObjectURL(file),
+  };
+}
+
+function clearDocumentUploadPreview() {
+  const current = state.ui.documentUploadPreview;
+  if (current?.objectUrl?.startsWith("blob:")) {
+    URL.revokeObjectURL(current.objectUrl);
+  }
+  state.ui.documentUploadPreview = null;
+  syncDocumentUploadPreviewDom();
+}
+
+function setDocumentUploadPreview(file) {
+  clearDocumentUploadPreview();
+  if (!file) {
+    syncDocumentUploadPreviewDom();
+    return;
+  }
+  state.ui.documentUploadPreview = documentUploadMeta(file);
+  syncDocumentUploadPreviewDom();
+}
+
+function syncDocumentUploadPreviewDom() {
+  const slot = document.getElementById("documentUploadPreviewSlot");
+  if (slot) {
+    slot.innerHTML = renderDocumentUploadPreview();
+  }
+}
+
+function setDocumentDraftSelection(draftId, key, value) {
+  const current = state.ui.documentDraftSelections?.[draftId] || {};
+  state.ui.documentDraftSelections = {
+    ...state.ui.documentDraftSelections,
+    [draftId]: {
+      ...current,
+      [key]: value,
+    },
+  };
+}
+
+function documentDraftSelectionFor(draftId) {
+  return state.ui.documentDraftSelections?.[draftId] || {};
+}
+
+function documentSummaryPayload(draft) {
+  return draft?.review_json || draft?.proposed_json || {};
+}
+
+function formatDocumentFactValue(value) {
+  if (value === null || value === undefined || value === "") return "";
+  if (typeof value === "number") return formatIngestAmount(value, "");
+  if (Array.isArray(value)) return value.map((item) => formatDocumentFactValue(item)).filter(Boolean).join(" · ");
+  return String(value);
+}
+
+function formatDocumentPercent(value) {
+  const amount = Number(value);
+  if (Number.isNaN(amount)) return String(value);
+  return `${new Intl.NumberFormat("sv-SE", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(amount)} %`;
+}
+
+function formatDocumentFact(label, value) {
+  if (value === null || value === undefined || value === "") return "";
+  if (typeof value === "number") {
+    if (/ränta/i.test(label)) return formatDocumentPercent(value);
+    return money(value);
+  }
+  const isDateField = /datum/i.test(label);
+  const parsedDate = typeof value === "string" ? new Date(value) : null;
+  if (isDateField && parsedDate && !Number.isNaN(parsedDate.getTime())) {
+    return dateLabel(parsedDate);
+  }
+  return String(value);
+}
+
+function documentConfidenceForWorkflow(workflow) {
+  const draft = workflow?.drafts?.find((item) => item.status === "pending_review") || workflow?.drafts?.[0];
+  return draft?.confidence ?? workflow?.document?.confidence ?? null;
+}
+
+function documentFactsForWorkflow(workflow) {
+  const draft = workflow?.drafts?.[0];
+  const payload = documentSummaryPayload(draft);
+  const facts = [
+    ["Dokumenttyp", classificationLabel(payload.document_type || workflow?.document?.document_type)],
+    ["Långivare", payload.lender || workflow?.document?.issuer],
+    ["Objekt / fordon", payload.object_vehicle || payload.purpose],
+    ["Faktureringsdatum", payload.billing_date || payload.issue_date],
+    ["Förfallodatum", payload.payment_due_date || payload.due_date],
+    ["Att betala", payload.payment_amount ?? payload.required_monthly_payment],
+    ["Ränta", payload.interest_rate ?? payload.nominal_rate],
+    ["Skuld före amortering", payload.debt_before_amortization ?? payload.current_balance],
+    ["Amortering", payload.amortization ?? payload.amortization_amount_monthly],
+    ["Räntekostnad", payload.interest_cost ?? payload.interest_cost_amount],
+    ["Administrationsavgift", payload.fees ?? payload.fee_amount],
+  ];
+  return facts
+    .map(([label, value]) => [label, formatDocumentFact(label, value)])
+    .filter(([, value]) => value);
+}
+
+function documentSimilarText(value) {
+  return String(value || "").toLowerCase().trim();
+}
+
+function scoreDocumentMatch(source, candidate) {
+  const sourceText = documentSimilarText(source);
+  const candidateText = documentSimilarText(candidate);
+  if (!sourceText || !candidateText) return 0;
+  if (candidateText === sourceText) return 4;
+  if (candidateText.includes(sourceText) || sourceText.includes(candidateText)) return 3;
+  const sourceParts = sourceText.split(/\s+/).filter(Boolean);
+  const candidateParts = candidateText.split(/\s+/).filter(Boolean);
+  const overlap = sourceParts.filter((part) => candidateParts.includes(part)).length;
+  return overlap;
+}
+
+function documentVehicleMatches(workflow) {
+  const draft = workflow?.drafts?.[0];
+  const payload = documentSummaryPayload(draft);
+  const hint = payload.object_vehicle || payload.purpose || workflow?.document?.issuer || "";
+  return vehiclesForHousehold()
+    .map((vehicle) => {
+      const label = [vehicle.make, vehicle.model, vehicle.label].filter(Boolean).join(" ");
+      return { vehicle, score: scoreDocumentMatch(hint, label) };
+    })
+    .filter((item) => item.score > 0)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 3);
+}
+
+function documentLoanMatches(workflow) {
+  const draft = workflow?.drafts?.[0];
+  const payload = documentSummaryPayload(draft);
+  const hint = payload.lender || workflow?.document?.issuer || "";
+  return loansForHousehold()
+    .map((loan) => {
+      const label = [loan.lender, loan.purpose].filter(Boolean).join(" ");
+      return { loan, score: scoreDocumentMatch(hint, label) };
+    })
+    .filter((item) => item.score > 0)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 3);
+}
+
+function documentConnectionHint(workflow) {
+  const facts = documentFactsForWorkflow(workflow);
+  const vehicleMatches = documentVehicleMatches(workflow);
+  const loanMatches = documentLoanMatches(workflow);
+  const hasDraft = Boolean(workflow?.drafts?.length);
+  const draft = workflow?.drafts?.[0];
+  const payload = documentSummaryPayload(draft);
+  return {
+    facts,
+    vehicleMatches,
+    loanMatches,
+    needsManualLink: Boolean(payload.object_vehicle) && !vehicleMatches.length,
+    hasDraft,
+  };
 }
 
 function groupIngestSuggestions(suggestions) {
@@ -3497,59 +3764,56 @@ function renderDocumentsPageV2() {
   const drafts = draftsForHousehold();
   return `
     <section class="page-wrap">
-      ${renderPageHeader("Dokument", "Ladda upp, extrahera och granska underlag utan att blanda ihop råinput och kanonisk data")}
+      ${renderPageHeader("Dokument", "Ladda upp, fotografera, tolka och applicera ekonomiska underlag i ett sammanhållet flöde.")}
       ${renderIngestPipelineStrip()}
-      <section class="split-layout">
-        <article class="panel form-card">
-          <span class="section-eyebrow">Rå input</span>
-          <h3>Klistra in text eller peka ut ett dokument</h3>
-          <p class="muted">Välj underlagstyp, klistra in text från faktura eller avtal, eller ladda upp en PDF/dokumentfil för extraktion i workflow-lagret.</p>
-          <form id="ingestAnalyzeForm" class="form-grid">
-            ${renderField({ key: "ingest_input_kind", label: "Underlagstyp", type: "select", options: ingestKindOptions(), required: true }, state.ui.ingestKind || "text")}
-            ${renderField({ key: "ingest_source_name", label: "Källa eller avsändare", type: "text" }, state.ui.ingestSourceName || "")}
-            ${renderField({ key: "ingest_input_text", label: "Råtext", type: "textarea", full: true, required: true, placeholder: "Klistra in text från faktura, abonnemang eller PDF här." }, state.ui.ingestInput || "")}
-            <div class="field full">
-              <div class="form-actions">
-                <button class="primary" type="submit" ${selectedHousehold() ? "" : "disabled"}>${state.ui.ingestPending ? "Analyserar..." : "Analysera underlag"}</button>
-                <button class="ghost" type="button" data-action="clear-ingest">Rensa</button>
+      <section class="hero-grid document-hero">
+        <article class="panel document-primary-panel">
+          <span class="section-eyebrow">Dokumentinkorg</span>
+          <h3>En väg in för upload, foto och tolkning</h3>
+          <p class="muted">Välj en fil, ta en bild med mobilen eller klistra in råtext som fallback. Preview och tolkning hålls kvar i samma arbetsyta så att du ser vad som händer.</p>
+          ${selectedHousehold()
+            ? `
+              ${renderDocumentUploadForm()}
+              <div class="workflow-callout subtle">
+                <strong>Råtext som fallback</strong>
+                <p class="muted">Om du vill klistra in text från ett underlag kan du köra AI-analys här utan att lämna documents-sidan.</p>
               </div>
-            </div>
-          </form>
-          <div class="workflow-callout">
-            <strong>Uppladdade dokument kan också användas som input.</strong>
-            <p class="muted">Om dokumentet redan finns i listan nedan och har extraherad text kan du skicka texten direkt tillbaka till Data-In.</p>
-          </div>
-          <div class="upload-box">
-            ${renderDocumentUploadForm()}
-          </div>
-          ${renderIngestImageReadiness()}
+              <form id="ingestAnalyzeForm" class="form-grid document-manual-analyze">
+                ${renderField({ key: "ingest_input_kind", label: "Underlagstyp", type: "select", options: ingestKindOptions(), required: true }, state.ui.ingestKind || "text")}
+                ${renderField({ key: "ingest_source_name", label: "Källa eller avsändare", type: "text" }, state.ui.ingestSourceName || "")}
+                ${renderField({ key: "ingest_input_text", label: "Råtext", type: "textarea", full: true, required: true, placeholder: "Klistra in text från faktura, abonnemang eller PDF här." }, state.ui.ingestInput || "")}
+                <div class="field full">
+                  <div class="form-actions upload-actions">
+                    <button class="primary" type="submit">${state.ui.ingestPending ? "Analyserar..." : "Analysera text"}</button>
+                    <button class="ghost" type="button" data-action="clear-ingest">Rensa</button>
+                  </div>
+                </div>
+              </form>
+              ${state.ui.ingestResult ? renderIngestResult() : `<article class="workflow-callout subtle"><strong>Senaste tolkning</strong><p class="muted">När du analyserar text visas tolkning, confidence, fält och förslag här.</p></article>`}
+              ${renderIngestImageReadiness()}
+            `
+            : `<div class="empty-state"><p class="empty-copy">Välj hushåll först så att uppladdningen hamnar rätt.</p></div>`}
         </article>
-        <article class="panel form-card">
-          <span class="section-eyebrow">AI-review</span>
-          <h3>Det som är säkert, tveksamt och nästa riktning</h3>
-          <p class="muted">Här ska du se vad modellen tror, varför den tror det, och vad som fortfarande är osäkert innan du promtar vidare.</p>
-        ${renderIngestResult()}
-        </article>
+        ${renderDocumentWorkflowPanel()}
       </section>
       <section class="split-layout">
         <article class="panel">
-          <span class="section-eyebrow">Uppladdade dokument</span>
+          <span class="section-eyebrow">Dokumentinkorg</span>
           <h3>${items.length ? `${items.length} dokument` : "Inga dokument ännu"}</h3>
-          <p class="muted">Varje dokument visar tydligt status, analysbarhet och en väg vidare till review. Chatten använder inte dokumentdata som ekonomisk sanning innan ett utkast har applicerats till kanonisk data.</p>
+          <p class="muted">Här ser du vad som är uppladdat, vad som redan är tolkat och vilket dokument som just nu är aktivt i granskningen.</p>
           <div class="record-grid">
             ${items.map((item) => renderDocumentRowV2(item)).join("") || `<div class="empty-state"><p>Inga dokument uppladdade ännu.</p></div>`}
           </div>
         </article>
         <article class="panel">
-          <span class="section-eyebrow">Workflow-utkast</span>
+          <span class="section-eyebrow">Granska och applicera</span>
           <h3>${drafts.length ? `${drafts.length} utkast att granska` : "Inga utkast att granska"}</h3>
-          <p class="muted">Det här är inte kanoniska hushållsposter. Det är reviewobjekt som fortfarande kräver explicit apply senare.</p>
+          <p class="muted">Godkänn, koppla, skjut upp eller avvisa här. Varje apply visar en tydlig bekräftelse på vad som skrevs till kanonisk data.</p>
           <div class="record-grid">
-            ${drafts.map((draft) => renderDraftCard(draft)).join("") || `<div class="empty-state"><p>Det finns inga väntande reviewutkast.</p></div>`}
+            ${drafts.map((draft) => renderDocumentDraftReviewCard(draft)).join("") || `<div class="empty-state"><p>Det finns inga väntande reviewutkast.</p></div>`}
           </div>
         </article>
       </section>
-      ${renderDocumentWorkflowPanel()}
       <article class="panel">
         <span class="section-eyebrow">Leverantörsnormalisering</span>
         <h3>Kända leverantörsnamn</h3>
@@ -3597,6 +3861,7 @@ function draftStatusBadge(status) {
     deferred: `<span class="badge muted">Uppskjuten</span>`,
     approved: `<span class="badge success">Godkänd</span>`,
     rejected: `<span class="badge muted">Avvisad</span>`,
+    apply_failed: `<span class="badge danger">Misslyckades</span>`,
   }[status] || `<span class="badge muted">${escapeHtml(status)}</span>`;
 }
 
@@ -3694,67 +3959,210 @@ function selectedDocumentWorkflow() {
   return state.ui.selectedDocumentWorkflow;
 }
 
-function renderDocumentWorkflowPanel() {
-  const workflow = selectedDocumentWorkflow();
-  const document = workflow?.document || selectedDocument();
+function renderDocumentPreview(document) {
   if (!document) {
+    return `<div class="empty-state"><p>Välj ett dokument för att se preview här.</p></div>`;
+  }
+
+  const src = documentPreviewUrl(document);
+  const kind = documentMimeCategory(document);
+  if (kind === "image") {
+    return `<img class="document-preview-image document-preview-large" src="${escapeHtml(src)}" alt="Förhandsvisning av dokumentet" />`;
+  }
+  if (kind === "pdf") {
+    return `<iframe class="document-preview-frame document-preview-large" src="${escapeHtml(src)}" title="Förhandsvisning av dokumentet"></iframe>`;
+  }
+  return `
+    <article class="workflow-callout subtle">
+      <strong>Förhandsvisning</strong>
+      <p class="muted">Den här filtypen förhandsvisas som nedladdningslänk.</p>
+      <a class="ghost compact" href="${escapeHtml(src)}" target="_blank" rel="noreferrer">Öppna filen</a>
+    </article>
+  `;
+}
+
+function renderDocumentStatusRail(workflow, document) {
+  const currentStatus = workflow?.workflow_status || document?.extraction_status || "uploaded";
+  const steps = workflow?.status_steps?.length
+    ? workflow.status_steps
+    : [
+        { key: "uploaded", label_sv: "Uppladdad", active: currentStatus === "uploaded", completed: false },
+        { key: "interpreted", label_sv: "Tolkad", active: currentStatus === "interpreted", completed: currentStatus !== "uploaded" },
+        { key: "pending_review", label_sv: "Väntar på granskning", active: currentStatus === "pending_review", completed: ["approved", "applied"].includes(currentStatus) },
+        { key: "approved", label_sv: "Godkänd", active: currentStatus === "approved", completed: currentStatus === "applied" },
+        { key: "applied", label_sv: "Applicerad", active: currentStatus === "applied", completed: false },
+      ];
+  return `
+    <div class="document-status-rail">
+      ${steps.map((step) => `
+        <span class="status-chip ${(step.active || step.completed || step.key === currentStatus) ? "active" : ""} ${documentWorkflowStatusTone(step.key)}">${escapeHtml(step.label_sv || documentWorkflowStatusLabel(step.key))}</span>
+      `).join("")}
+    </div>
+  `;
+}
+
+function renderDocumentApplySummary(workflow = null) {
+  const summary = state.ui.documentApplySummary || workflow?.apply_summary;
+  if (!summary) {
     return `
-      <section class="split-layout">
-        <article class="panel">
-          <span class="section-eyebrow">Dokumentdetalj</span>
-          <h3>Välj ett dokument</h3>
-          <p class="muted">Här visas exakt vad som laddades upp, vad som extraherades, vilka utkast som skapades, och om något kopplats till ett riktigt lån.</p>
-        </article>
-      </section>
+      <article class="workflow-callout subtle document-apply-summary">
+        <strong>Appliceringsbekräftelse</strong>
+        <p class="muted">När du godkänner ett förslag visas här exakt vad som skapades eller uppdaterades.</p>
+      </article>
     `;
   }
-  const statusMeta = documentExtractionMeta(workflow?.workflow_status || document.extraction_status);
-  const links = workflow?.canonical_links || [];
-  const drafts = workflow?.drafts || [];
+
   return `
-    <section class="split-layout">
-      <article class="panel">
-        <span class="section-eyebrow">Dokumentdetalj</span>
-        <div class="record-title-row">
-          <div>
-            <h3>${escapeHtml(document.file_name)}</h3>
-            <p class="muted">${escapeHtml(optionLabel(OPTIONS.documentType, document.document_type))}${document.issuer ? ` · ${escapeHtml(document.issuer)}` : ""}</p>
-          </div>
-          <span class="badge ${statusMeta.tone}">${statusMeta.label}</span>
+    <article class="workflow-callout document-apply-summary">
+      <div class="record-title-row">
+        <div>
+          <h4 class="record-title">Applicerat dokument</h4>
+          <p class="muted">${escapeHtml(summary.message_sv || "")}</p>
         </div>
-        <p class="muted">${escapeHtml(workflow?.status_detail || "Dokumentet är lagrat men saknar ännu reviewhistorik.")}</p>
-        ${document.processing_error ? `<p class="muted" style="color:var(--clr-danger)">Fel: ${escapeHtml(document.processing_error)}</p>` : ""}
-        <div class="detail-grid two fact-grid">
-          ${detailCell("Dokument-ID", document.id)}
-          ${detailCell("Uppladdat", dateLabel(document.uploaded_at))}
-          ${detailCell("Text extraherad", document.extracted_text ? "Ja" : "Nej")}
-          ${detailCell("Utkast skapade", drafts.length)}
+        <span class="badge ${summary.status === "applied" ? "success" : summary.status === "partial" ? "warning" : "muted"}">${escapeHtml(summary.status)}</span>
+      </div>
+      ${summary.mutations?.length ? `<ul class="summary-list">${summary.mutations.map((item) => `<li>${escapeHtml(item.summary_sv)}</li>`).join("")}</ul>` : ""}
+      ${summary.manual_actions_required?.length ? `<ul class="summary-list">${summary.manual_actions_required.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>` : ""}
+    </article>
+  `;
+}
+
+function resolutionActionLabel(action, entityType) {
+  if (action === "create_new") return entityType === "vehicle" ? "Skapa nytt fordon" : "Skapa nytt lån";
+  if (action === "link_existing") return entityType === "vehicle" ? "Koppla till befintligt fordon" : "Koppla till befintligt lån";
+  return "Välj manuellt";
+}
+
+function renderDocumentResolutionCard(resolution, workflow) {
+  const draft = (workflow?.drafts || []).find((item) => item.id === resolution.draft_id);
+  if (!draft) return "";
+  const reviewPayload = draft.review_json || draft.proposed_json || {};
+  const selection = state.ui.documentDraftSelections?.[draft.id] || {};
+  const hasVehicle = Boolean(reviewPayload.object_vehicle || reviewPayload.purpose);
+  const loanLabel = reviewPayload.lender || reviewPayload.provider || "Lån";
+  return `
+    <article class="record-card document-resolution-card">
+      <div class="record-title-row">
+        <div>
+          <h4 class="record-title">${escapeHtml(loanLabel)}</h4>
+          <p class="muted">${escapeHtml(resolution.reason || "Systemet försöker avgöra om rätt objekt redan finns.")}</p>
         </div>
-        ${(workflow?.key_fields || []).length ? `
-          <div style="margin-top:var(--space-m)">
-            <h4>Extraherade nyckelfält</h4>
-            <div class="detail-grid two fact-grid">
-              ${workflow.key_fields.map((field) => detailCell(`${field.label} (${field.source === "canonical_record" ? "kanoniskt" : "review"})`, field.value)).join("")}
-            </div>
-          </div>
-        ` : `<p class="muted">Inga extraherade nyckelfält sparade ännu. Kör analys och skapa reviewutkast för att låsa upp detaljerad granskning.</p>`}
-        ${links.length ? `
-          <div style="margin-top:var(--space-m)">
-            <h4>Koppling till kanonisk data</h4>
-            <div class="record-grid">
-              ${links.map((link) => `<article class="record-card compact"><strong>${escapeHtml(link.target_label)}</strong><p class="muted">${escapeHtml(link.target_entity_type)} #${escapeHtml(link.target_entity_id)} · draft #${escapeHtml(link.draft_id)}</p></article>`).join("")}
-            </div>
-          </div>
-        ` : `<p class="muted">Dokumentet är ännu inte kopplat till någon kanonisk post.</p>`}
-      </article>
-      <article class="panel">
-        <span class="section-eyebrow">Reviewyta</span>
-        <h3>${drafts.length ? `${drafts.length} utkast kopplade till dokumentet` : "Inga utkast ännu"}</h3>
-        <div class="record-grid">
-          ${drafts.map((draft) => renderDocumentDraftReviewCard(draft)).join("") || `<div class="empty-state"><p>Analysera dokumentet och skapa utkast först.</p></div>`}
+        ${draftStatusBadge(draft.status)}
+      </div>
+      ${renderLoanReviewFields(reviewPayload)}
+      <div class="detail-grid two fact-grid">
+        ${detailCell("Dokumenttyp", draftTargetLabel(draft.target_entity_type))}
+        ${detailCell("Confidence", draft.confidence != null ? `${Math.round(draft.confidence * 100)} %` : "Ej angiven")}
+      </div>
+      <div class="detail-grid two fact-grid document-resolution-grid">
+        <div class="detail-item">
+          <label>Det här lånet</label>
+          <select class="compact-select" name="document_resolution_loan_action_${draft.id}">
+            <option value="">Välj hur lånet ska hanteras</option>
+            <option value="create_new" ${selection.loanAction === "create_new" ? "selected" : ""}>Skapa nytt lån</option>
+            <option value="link_existing" ${selection.loanAction === "link_existing" ? "selected" : ""}>Koppla till befintligt lån</option>
+          </select>
+          ${resolution.loan_candidates?.length ? `
+            <select class="compact-select" name="document_resolution_loan_target_${draft.id}">
+              <option value="">Välj befintligt lån</option>
+              ${resolution.loan_candidates.map((item) => `<option value="${escapeHtml(item.entity_id)}" ${String(selection.loanTargetId || "") === String(item.entity_id) ? "selected" : ""}>${escapeHtml(item.label)}${item.confidence != null ? ` · ${Math.round(item.confidence * 100)} %` : ""}</option>`).join("")}
+            </select>
+          ` : `<p class="muted">Ingen tydlig lånmatchning hittades i hushållet.</p>`}
         </div>
-      </article>
-    </section>
+        ${hasVehicle ? `
+          <div class="detail-item">
+            <label>Fordonskoppling</label>
+            <select class="compact-select" name="document_resolution_vehicle_action_${draft.id}">
+              <option value="">Välj hur fordonet ska hanteras</option>
+              <option value="create_new" ${selection.vehicleAction === "create_new" ? "selected" : ""}>Skapa ny fordonspost</option>
+              <option value="link_existing" ${selection.vehicleAction === "link_existing" ? "selected" : ""}>Koppla till befintligt fordon</option>
+              <option value="skip" ${selection.vehicleAction === "skip" ? "selected" : ""}>Hoppa över fordonskoppling</option>
+            </select>
+            ${resolution.vehicle_candidates?.length ? `
+              <select class="compact-select" name="document_resolution_vehicle_target_${draft.id}">
+                <option value="">Välj befintligt fordon</option>
+                ${resolution.vehicle_candidates.map((item) => `<option value="${escapeHtml(item.entity_id)}" ${String(selection.vehicleTargetId || "") === String(item.entity_id) ? "selected" : ""}>${escapeHtml(item.label)}${item.confidence != null ? ` · ${Math.round(item.confidence * 100)} %` : ""}</option>`).join("")}
+              </select>
+            ` : `<p class="muted">Ingen tydlig fordonsträff hittades. Systemet kan skapa ny post för ${escapeHtml(reviewPayload.object_vehicle || reviewPayload.purpose)}.</p>`}
+          </div>
+        ` : ""}
+      </div>
+      <div class="actions-row">
+        <button class="primary compact" type="button" data-action="apply-document-resolution" data-draft-id="${draft.id}" ${state.ui.documentApplyPending ? "disabled" : ""}>${state.ui.documentApplyPending ? "Applicerar..." : "Applicera detta paket"}</button>
+        <button class="ghost compact" type="button" data-action="defer-draft" data-draft-id="${draft.id}">Skjut upp</button>
+        <button class="danger compact" type="button" data-delete-draft="${draft.id}">Avvisa</button>
+      </div>
+    </article>
+  `;
+}
+
+function renderDocumentSnapshot(workflow) {
+  const document = workflow?.document;
+  const facts = documentFactsForWorkflow(workflow);
+  const confidence = documentConfidenceForWorkflow(workflow);
+  const connection = documentConnectionHint(workflow);
+  const primaryDraft = workflow?.drafts?.[0];
+  const statusLabel = documentWorkflowStatusLabel(workflow?.workflow_status || document?.extraction_status);
+  const statusTone = documentWorkflowStatusTone(workflow?.workflow_status || document?.extraction_status);
+  return `
+    <div class="document-summary-stack">
+      <div class="badge-row">
+        <span class="badge ${statusTone}">${escapeHtml(statusLabel)}</span>
+        ${confidenceBadge(confidence)}
+        ${primaryDraft?.target_entity_type ? `<span class="badge info">${escapeHtml(draftTargetLabel(primaryDraft.target_entity_type))}</span>` : ""}
+      </div>
+      <p class="muted">${escapeHtml(workflow?.status_detail || "Det här dokumentet är redo för granskning eller väntar på att kopplas rätt.")}</p>
+      <div class="detail-grid two fact-grid document-summary-grid">
+        ${facts.length
+          ? facts.map(([label, value]) => detailCell(label, value)).join("")
+          : `<div class="empty-state compact"><p>Inga nyckelfält kunde ännu visas.</p></div>`}
+      </div>
+      <div class="badge-row">
+        ${connection.loanMatches.length ? `<span class="badge success">${connection.loanMatches.length} lånmatchning${connection.loanMatches.length > 1 ? "ar" : ""}</span>` : `<span class="badge muted">Ingen lånmatchning</span>`}
+        ${connection.vehicleMatches.length ? `<span class="badge success">${connection.vehicleMatches.length} fordonsmatchning${connection.vehicleMatches.length > 1 ? "ar" : ""}</span>` : `<span class="badge muted">Ingen fordonsmatchning</span>`}
+        ${connection.needsManualLink ? `<span class="badge warning">Kräver manuell koppling</span>` : `<span class="badge muted">Automatisk koppling räcker</span>`}
+      </div>
+      ${connection.vehicleMatches.length || connection.loanMatches.length ? `
+        <div class="document-match-list">
+          ${connection.loanMatches.length ? `
+            <article class="workflow-callout subtle">
+              <strong>Matchat lån</strong>
+              <div class="record-grid">
+                ${connection.loanMatches.map((item) => `
+                  <article class="record-card compact">
+                    <strong>${escapeHtml(item.loan.lender || item.loan.purpose || "Lån")}</strong>
+                    <p class="muted">${escapeHtml(item.loan.purpose || "Ingen specifik användning")} · ${money(item.loan.required_monthly_payment)}</p>
+                  </article>
+                `).join("")}
+              </div>
+            </article>
+          ` : ""}
+          ${connection.vehicleMatches.length ? `
+            <article class="workflow-callout subtle">
+              <strong>Matchat fordon</strong>
+              <div class="record-grid">
+                ${connection.vehicleMatches.map((item) => `
+                  <article class="record-card compact">
+                    <strong>${escapeHtml([item.vehicle.make, item.vehicle.model].filter(Boolean).join(" ") || "Fordon")}</strong>
+                    <p class="muted">${escapeHtml(item.vehicle.note || "Befintlig fordonspost")}</p>
+                  </article>
+                `).join("")}
+              </div>
+            </article>
+          ` : ""}
+        </div>
+      ` : ""}
+      ${connection.needsManualLink ? `
+        <article class="workflow-callout">
+          <strong>Manuell fordonskoppling behövs</strong>
+          <p class="muted">Dokumentet pekar mot ett fordon, men ingen tydlig post hittades ännu. Skapa eller koppla fordonet på fordonssidan när du vill låsa kedjan helt.</p>
+          <div class="actions-row">
+            <button class="ghost compact" type="button" data-action="prefill-vehicle-from-document" data-document-id="${document?.id || ""}">Förifyll fordon</button>
+            <button class="ghost compact" type="button" data-nav="vehicles">Öppna fordon</button>
+          </div>
+        </article>
+      ` : ""}
+    </div>
   `;
 }
 
@@ -3762,25 +4170,24 @@ function renderDocumentDraftReviewCard(draft) {
   const proposed = draft.proposed_json || {};
   const reviewPayload = draft.review_json || proposed;
   const loanSelectName = `document_link_loan_${draft.id}`;
+  const currentTarget = draft.status === "approved" && draft.canonical_target_entity_id
+    ? `${escapeHtml(draft.canonical_target_entity_type)} #${escapeHtml(draft.canonical_target_entity_id)}`
+    : null;
   return `
-    <article class="record-card">
+    <article class="record-card document-draft-card">
       <div class="record-title-row">
         <div>
           <h4 class="record-title">${escapeHtml(draftTargetLabel(draft.target_entity_type))}</h4>
-          <p class="muted">Draft #${draft.id} · status ${escapeHtml(draft.status)}</p>
+          <p class="muted">Utkast #${draft.id} · ${escapeHtml(draft.status)}${draft.confidence != null ? ` · confidence ${Math.round(draft.confidence * 100)}%` : ""}</p>
         </div>
         ${draftStatusBadge(draft.status)}
       </div>
       ${draft.target_entity_type === "loan" ? renderLoanReviewFields(reviewPayload) : ""}
-      <div class="detail-grid two fact-grid">
-        ${detailCell("Skapat utkast", draft.created_at ? dateLabel(draft.created_at) : "Okänt")}
-        ${detailCell("Confidence", draft.confidence != null ? `${Math.round(draft.confidence * 100)}%` : "Ej angiven")}
-      </div>
-      ${draft.review_error ? `<p class="muted" style="color:var(--clr-danger)">Misslyckades: ${escapeHtml(draft.review_error)}</p>` : ""}
-      ${draft.canonical_target_entity_id ? `<p class="muted">Applicerat till ${escapeHtml(draft.canonical_target_entity_type)} #${escapeHtml(draft.canonical_target_entity_id)}</p>` : ""}
+      ${currentTarget ? `<p class="muted">Kanonisk koppling: ${currentTarget}</p>` : ""}
+      ${draft.review_error ? `<p class="muted" style="color:var(--danger)">Misslyckades: ${escapeHtml(draft.review_error)}</p>` : ""}
       ${draft.status === "pending_review" ? `
         <div class="actions-row">
-          <button class="primary compact" type="button" data-action="apply-draft-create" data-draft-id="${draft.id}">Skapa nytt ${escapeHtml(draftTargetLabel(draft.target_entity_type).toLowerCase())}</button>
+          <button class="primary compact" type="button" data-action="apply-draft-create" data-draft-id="${draft.id}">Godkänn och skapa nytt ${escapeHtml(draftTargetLabel(draft.target_entity_type).toLowerCase())}</button>
           ${draft.target_entity_type === "loan" ? `
             <select name="${loanSelectName}" class="compact-select">
               <option value="">Välj befintligt lån</option>
@@ -3797,6 +4204,72 @@ function renderDocumentDraftReviewCard(draft) {
         <pre>${escapeHtml(JSON.stringify(reviewPayload, null, 2))}</pre>
       </details>
     </article>
+  `;
+}
+
+function renderDocumentWorkflowPanel() {
+  const workflow = selectedDocumentWorkflow();
+  const document = workflow?.document || selectedDocument();
+  if (!document) {
+    return `
+      <section class="panel">
+        <span class="section-eyebrow">Tolkning</span>
+        <h3>Välj ett dokument</h3>
+        <p class="muted">Här visas preview, extraherade fält, sannolik objektkedja och vad som ska appliceras när du godkänner.</p>
+      </section>
+    `;
+  }
+  const statusMeta = documentExtractionMeta(workflow?.workflow_status || document.extraction_status);
+  const drafts = workflow?.drafts || [];
+  const links = workflow?.canonical_links || [];
+  return `
+    <section class="panel document-workbench-panel">
+      <div class="record-title-row">
+        <div>
+          <span class="section-eyebrow">Tolkning</span>
+          <h3>${escapeHtml(document.file_name)}</h3>
+          <p class="muted">${escapeHtml(optionLabel(OPTIONS.documentType, document.document_type))}${document.issuer ? ` · ${escapeHtml(document.issuer)}` : ""}</p>
+        </div>
+        <span class="badge ${statusMeta.tone}">${statusMeta.label}</span>
+      </div>
+      <p class="muted">${escapeHtml(workflow?.status_detail || "Dokumentet är laddat men behöver fortfarande din bekräftelse.")}</p>
+      ${document.processing_error ? `<p class="muted" style="color:var(--danger)">Fel: ${escapeHtml(document.processing_error)}</p>` : ""}
+      ${renderDocumentPreview(document)}
+      ${renderDocumentStatusRail(workflow, document)}
+      ${renderDocumentApplySummary(workflow)}
+      ${renderDocumentSnapshot(workflow)}
+      ${(workflow?.entity_resolutions || []).length ? `
+        <article class="workflow-callout subtle">
+          <strong>Föreslagen objektkedja</strong>
+          <p class="muted">Bekräfta hur dokumentet ska kopplas i systemet. Du ser direkt om det gäller lån, fordon eller båda.</p>
+          <div class="record-grid">
+            ${workflow.entity_resolutions.map((resolution) => renderDocumentResolutionCard(resolution, workflow)).join("")}
+          </div>
+        </article>
+      ` : ""}
+      ${links.length ? `
+        <article class="workflow-callout subtle">
+          <strong>Applikerad koppling</strong>
+          <div class="record-grid">
+            ${links.map((link) => `
+              <article class="record-card compact">
+                <strong>${escapeHtml(link.target_label)}</strong>
+                <p class="muted">${escapeHtml(link.target_entity_type)} #${escapeHtml(link.target_entity_id)} · utkast #${escapeHtml(link.draft_id)}</p>
+              </article>
+            `).join("")}
+          </div>
+        </article>
+      ` : ""}
+      <article class="workflow-callout subtle">
+        <strong>Vad händer vid apply</strong>
+        <p class="muted">Du godkänner först ett förslag, därefter skrivs det till kanonisk data. Om något behöver justeras kan du redigera, skjuta upp eller avvisa innan du applicerar.</p>
+      </article>
+      <div class="actions-row">
+        <button class="ghost compact" type="button" data-action="prefill-loan-from-document" data-document-id="${document.id}">Förifyll lån</button>
+        <button class="ghost compact" type="button" data-action="prefill-vehicle-from-document" data-document-id="${document.id}">Förifyll fordon</button>
+      </div>
+      ${drafts.length ? `<p class="muted">Det finns ${drafts.length} utkast kopplade till dokumentet nedan.</p>` : ""}
+    </section>
   `;
 }
 
@@ -4063,19 +4536,220 @@ function selectedDocument() {
 async function loadSelectedDocumentWorkflow(documentId = state.ui.selectedDocumentId) {
   if (!documentId) {
     state.ui.selectedDocumentWorkflow = null;
+    state.ui.documentDraftSelections = {};
     return;
   }
   try {
     state.ui.selectedDocumentWorkflow = await request(`/documents/${documentId}/review`);
+    syncDocumentDraftSelections();
   } catch (_err) {
     state.ui.selectedDocumentWorkflow = null;
+    state.ui.documentDraftSelections = {};
   }
+}
+
+function syncDocumentDraftSelections() {
+  const workflow = state.ui.selectedDocumentWorkflow;
+  const selections = {};
+  (workflow?.entity_resolutions || []).forEach((resolution) => {
+    const draft = (workflow?.drafts || []).find((item) => item.id === resolution.draft_id);
+    const reviewPayload = draft?.review_json || draft?.proposed_json || {};
+    const hasVehicle = Boolean(reviewPayload.object_vehicle || reviewPayload.purpose);
+    const bestLoan = resolution.loan_candidates?.[0];
+    const bestVehicle = resolution.vehicle_candidates?.[0];
+    selections[resolution.draft_id] = {
+      loanAction: resolution.recommended_action === "manual_review" ? "" : (bestLoan?.recommended_action === "link_existing" ? "link_existing" : "create_new"),
+      loanTargetId: bestLoan?.entity_id ? String(bestLoan.entity_id) : "",
+      vehicleAction: hasVehicle ? (bestVehicle?.recommended_action === "link_existing" ? "link_existing" : (resolution.recommended_action === "manual_review" && bestVehicle ? "" : "create_new")) : "skip",
+      vehicleTargetId: bestVehicle?.entity_id ? String(bestVehicle.entity_id) : "",
+    };
+  });
+  state.ui.documentDraftSelections = selections;
 }
 
 function latestScenarioResult(scenarioId) {
   return scenarioResultsForHousehold()
     .filter((item) => item.scenario_id === scenarioId)
     .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())[0] || null;
+}
+
+function buildDocumentApplySummary(draft, action, response, document) {
+  const payload = documentSummaryPayload(draft);
+  const items = [];
+  if (action === "link_existing") {
+    items.push(`Kopplade till befintligt lån #${response.target_entity_id}.`);
+  } else {
+    items.push(`Skapade ny kanonisk post för ${draftTargetLabel(draft.target_entity_type).toLowerCase()}.`);
+  }
+  if (payload.lender || document?.issuer) {
+    items.push(`Långivare: ${payload.lender || document.issuer}.`);
+  }
+  if (payload.object_vehicle || payload.purpose) {
+    items.push(`Objekt / fordon: ${payload.object_vehicle || payload.purpose}.`);
+  }
+  if (payload.required_monthly_payment || payload.payment_amount) {
+    items.push(`Månadskostnad: ${money(payload.required_monthly_payment || payload.payment_amount)}.`);
+  }
+  if (payload.current_balance || payload.debt_before_amortization) {
+    items.push(`Skuld före amortering: ${money(payload.current_balance || payload.debt_before_amortization)}.`);
+  }
+  if (response.target_entity_type && response.target_entity_id) {
+    items.push(`Kanonisk koppling: ${response.target_entity_type} #${response.target_entity_id}.`);
+  }
+  items.push(`Dokumentstatus: ${documentWorkflowStatusLabel(selectedDocumentWorkflow()?.workflow_status || document?.extraction_status || "applied")}.`);
+  return {
+    title: `${draftTargetLabel(draft.target_entity_type)} applicerat`,
+    description: document?.file_name || `Dokument #${draft.document_id}`,
+    items,
+  };
+}
+
+function summarizeDocumentDraftForConfirm(draft, action, targetEntityId = null) {
+  const payload = documentSummaryPayload(draft);
+  const selection = documentDraftSelectionFor(draft.id);
+  const lines = [
+    `Dokument: ${payload.provider || payload.lender || draft.document_id}`,
+    `Objekt: ${payload.object_vehicle || payload.purpose || "inget objekt angivet"}`,
+  ];
+  if (action === "link_existing" && targetEntityId) {
+    lines.push(`Koppla till lån #${targetEntityId}`);
+  } else {
+    lines.push(`Skapa ny ${draftTargetLabel(draft.target_entity_type).toLowerCase()}`);
+  }
+  if (selection.vehicleAction === "link_existing" && selection.vehicleTargetId) {
+    lines.push(`Fordonskoppling: befintligt fordon #${selection.vehicleTargetId}`);
+  } else if (selection.vehicleAction === "create_new") {
+    lines.push("Fordonskoppling: skapa ny fordonspost");
+  } else if (selection.vehicleAction === "skip") {
+    lines.push("Fordonskoppling: hoppa över");
+  }
+  if (payload.required_monthly_payment || payload.payment_amount) {
+    lines.push(`Månadskostnad: ${money(payload.required_monthly_payment || payload.payment_amount)}`);
+  }
+  if (payload.debt_before_amortization || payload.current_balance) {
+    lines.push(`Skuld: ${money(payload.debt_before_amortization || payload.current_balance)}`);
+  }
+  return lines.join("\n");
+}
+
+function buildDocumentResolutionApplyPayload(workflow, draftId) {
+  const draft = (workflow?.drafts || []).find((item) => item.id === draftId);
+  if (!draft) {
+    throw new Error("Utkastet hittades inte i dokumentflödet.");
+  }
+  const selection = documentDraftSelectionFor(draftId);
+  if (!selection.loanAction) {
+    throw new Error("Välj hur lånet ska hanteras innan du applicerar.");
+  }
+  if (selection.loanAction === "link_existing" && !selection.loanTargetId) {
+    throw new Error("Välj vilket befintligt lån dokumentet ska kopplas till.");
+  }
+  if (selection.vehicleAction === "link_existing" && !selection.vehicleTargetId) {
+    throw new Error("Välj vilket befintligt fordon dokumentet ska kopplas till.");
+  }
+
+  const payload = {
+    draft_ids: [draftId],
+    draft_actions: [
+      {
+        draft_id: draftId,
+        action: selection.loanAction,
+        ...(selection.loanAction === "link_existing" && selection.loanTargetId
+          ? { target_entity_id: Number(selection.loanTargetId) }
+          : {}),
+      },
+    ],
+    related_actions: [],
+  };
+
+  if (selection.vehicleAction) {
+    payload.related_actions.push({
+      source_draft_id: draftId,
+      entity_type: "vehicle",
+      action: selection.vehicleAction,
+      ...(selection.vehicleAction === "link_existing" && selection.vehicleTargetId
+        ? { target_entity_id: Number(selection.vehicleTargetId) }
+        : {}),
+    });
+  }
+
+  return payload;
+}
+
+async function applyDocumentResolutionPackage(draftId) {
+  if (!selectedHousehold()) throw new Error("Välj hushåll först.");
+  const workflow = selectedDocumentWorkflow();
+  const document = workflow?.document || selectedDocument();
+  if (!workflow || !document) {
+    throw new Error("Dokumentets granskningsvy kunde inte läsas in.");
+  }
+  const draft = (workflow.drafts || []).find((item) => item.id === draftId);
+  if (!draft) {
+    throw new Error("Utkastet hittades inte.");
+  }
+
+  const selection = documentDraftSelectionFor(draftId);
+  const action = selection.loanAction === "link_existing" && selection.loanTargetId ? "link_existing" : "create_new";
+  const targetId = action === "link_existing" ? Number(selection.loanTargetId) : null;
+  const summaryLines = summarizeDocumentDraftForConfirm(draft, action, targetId);
+  const confirmed = window.confirm(`Applicera följande?\n\n${summaryLines}`);
+  if (!confirmed) return;
+
+  const requestBody = buildDocumentResolutionApplyPayload(workflow, draftId);
+  state.ui.documentApplyPending = true;
+  render();
+
+  try {
+    const response = await request(`/documents/${document.id}/apply`, {
+      method: "POST",
+      body: JSON.stringify(requestBody),
+    });
+    await refreshAllData();
+    state.ui.selectedDocumentId = document.id;
+    state.ui.documentApplySummary = response.apply_summary;
+    state.ui.selectedDocumentWorkflow = response.workflow;
+    syncDocumentDraftSelections();
+    state.ui.ingestResult = null;
+    showToast("Dokumentpaketet applicerades.", "success");
+    render();
+  } finally {
+    state.ui.documentApplyPending = false;
+  }
+}
+
+async function applyDocumentDraft(draftId, action, targetEntityId = null) {
+  if (!selectedHousehold()) throw new Error("Välj hushåll först.");
+  const draft = state.data.drafts.find((item) => item.id === draftId);
+  if (!draft) throw new Error("Utkastet hittades inte.");
+  const document = state.data.documents.find((item) => item.id === draft.document_id) || null;
+  const summaryLines = summarizeDocumentDraftForConfirm(draft, action, targetEntityId);
+  const confirmed = window.confirm(`Applicera följande?\n\n${summaryLines}`);
+  if (!confirmed) return;
+
+  state.ui.documentApplyPending = true;
+  render();
+
+  const body = action === "link_existing"
+    ? { action, target_entity_id: targetEntityId }
+    : { action: "create_new" };
+
+  try {
+    const response = await request(`/extraction_drafts/${draftId}/apply`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+    await refreshAllData();
+    if (document?.id) {
+      state.ui.selectedDocumentId = document.id;
+      await loadSelectedDocumentWorkflow(document.id);
+    }
+    state.ui.documentApplySummary = buildDocumentApplySummary(draft, action, response, document);
+    state.ui.ingestResult = null;
+    showToast(action === "link_existing" ? "Utkastet kopplades till befintligt lån." : "Utkastet applicerades.", "success");
+    render();
+  } finally {
+    state.ui.documentApplyPending = false;
+  }
 }
 
 async function handlePageClick(event) {
@@ -4126,16 +4800,14 @@ async function handlePageClick(event) {
 
   const applyDraftTarget = event.target.closest("[data-apply-draft]");
   if (applyDraftTarget) {
-    await request(`/extraction_drafts/${Number(applyDraftTarget.dataset.applyDraft)}/apply`, { method: "POST" });
-    await refreshAllData();
-    render();
-    showToast("Utkastet applicerades.");
+    await applyDocumentDraft(Number(applyDraftTarget.dataset.applyDraft), "create_new");
     return;
   }
 
   const selectDocumentTarget = event.target.closest("[data-action='select-document']");
   if (selectDocumentTarget) {
     state.ui.selectedDocumentId = Number(selectDocumentTarget.dataset.documentId);
+    state.ui.documentApplySummary = null;
     await loadSelectedDocumentWorkflow();
     render();
     return;
@@ -4143,14 +4815,13 @@ async function handlePageClick(event) {
 
   const applyDraftCreateTarget = event.target.closest("[data-action='apply-draft-create']");
   if (applyDraftCreateTarget) {
-    const draftId = Number(applyDraftCreateTarget.dataset.draftId);
-    await request(`/extraction_drafts/${draftId}/apply`, {
-      method: "POST",
-      body: JSON.stringify({ action: "create_new" }),
-    });
-    await refreshAllData();
-    render();
-    showToast("Utkastet applicerades till en ny kanonisk post.");
+    await applyDocumentDraft(Number(applyDraftCreateTarget.dataset.draftId), "create_new");
+    return;
+  }
+
+  const applyDocumentResolutionTarget = event.target.closest("[data-action='apply-document-resolution']");
+  if (applyDocumentResolutionTarget) {
+    await applyDocumentResolutionPackage(Number(applyDocumentResolutionTarget.dataset.draftId));
     return;
   }
 
@@ -4163,13 +4834,7 @@ async function handlePageClick(event) {
       showToast("Välj ett befintligt lån först.", "error");
       return;
     }
-    await request(`/extraction_drafts/${draftId}/apply`, {
-      method: "POST",
-      body: JSON.stringify({ action: "link_existing", target_entity_id: loanId }),
-    });
-    await refreshAllData();
-    render();
-    showToast("Dokumentutkastet kopplades till befintligt lån.");
+    await applyDocumentDraft(draftId, "link_existing", loanId);
     return;
   }
 
@@ -4318,7 +4983,47 @@ async function handlePageClick(event) {
     state.ui.ingestDocumentId = null;
     state.ui.ingestSourceName = "";
     state.ui.ingestResult = null;
+    state.ui.documentApplySummary = null;
+    clearDocumentUploadPreview();
     render();
+    return;
+  }
+
+  const prefillLoanTarget = event.target.closest("[data-action='prefill-loan-from-document']");
+  if (prefillLoanTarget) {
+    const document = state.data.documents.find((item) => item.id === Number(prefillLoanTarget.dataset.documentId));
+    const workflow = state.ui.selectedDocumentWorkflow;
+    const draft = workflow?.drafts?.[0];
+    const payload = documentSummaryPayload(draft);
+    setEdit("loan", {
+      household_id: state.selectedHouseholdId,
+      type: "car",
+      purpose: payload.object_vehicle || payload.purpose || document?.issuer || "",
+      lender: payload.lender || document?.issuer || "",
+      current_balance: payload.current_balance ?? payload.debt_before_amortization ?? null,
+      required_monthly_payment: payload.required_monthly_payment ?? payload.payment_amount ?? null,
+      nominal_rate: payload.nominal_rate ?? payload.interest_rate ?? null,
+      amortization_amount_monthly: payload.amortization_amount_monthly ?? payload.amortization ?? null,
+      due_day: payload.payment_due_date ? new Date(payload.payment_due_date).getDate() : null,
+      note: document?.file_name ? `Förifylld från ${document.file_name}` : "",
+    });
+    navigateTo("loans");
+    return;
+  }
+
+  const prefillVehicleTarget = event.target.closest("[data-action='prefill-vehicle-from-document']");
+  if (prefillVehicleTarget) {
+    const document = state.data.documents.find((item) => item.id === Number(prefillVehicleTarget.dataset.documentId));
+    const workflow = state.ui.selectedDocumentWorkflow;
+    const draft = workflow?.drafts?.[0];
+    const payload = documentSummaryPayload(draft);
+    setEdit("vehicle", {
+      household_id: state.selectedHouseholdId,
+      make: payload.object_vehicle || payload.purpose || document?.issuer || "",
+      model: "",
+      note: document?.file_name ? `Förifylld från ${document.file_name}` : "",
+    });
+    navigateTo("vehicles");
     return;
   }
 
@@ -4350,6 +5055,21 @@ function handlePageInput(event) {
     state.ui.ingestKind = event.target.value;
   } else if (event.target.name === "ingest_source_name") {
     state.ui.ingestSourceName = event.target.value;
+  } else if (event.target.name && event.target.name.startsWith("document_resolution_loan_action_")) {
+    const draftId = Number(event.target.name.replace("document_resolution_loan_action_", ""));
+    setDocumentDraftSelection(draftId, "loanAction", event.target.value);
+  } else if (event.target.name && event.target.name.startsWith("document_resolution_loan_target_")) {
+    const draftId = Number(event.target.name.replace("document_resolution_loan_target_", ""));
+    setDocumentDraftSelection(draftId, "loanTargetId", event.target.value);
+  } else if (event.target.name && event.target.name.startsWith("document_resolution_vehicle_action_")) {
+    const draftId = Number(event.target.name.replace("document_resolution_vehicle_action_", ""));
+    setDocumentDraftSelection(draftId, "vehicleAction", event.target.value);
+  } else if (event.target.name && event.target.name.startsWith("document_resolution_vehicle_target_")) {
+    const draftId = Number(event.target.name.replace("document_resolution_vehicle_target_", ""));
+    setDocumentDraftSelection(draftId, "vehicleTargetId", event.target.value);
+  } else if (event.target.name === "file") {
+    const file = event.target.files?.[0] || null;
+    setDocumentUploadPreview(file);
   } else if (event.target.name && event.target.name.startsWith("draft_edit_json_")) {
     state.ui.editingDraftJson = event.target.value;
   }
@@ -4503,6 +5223,7 @@ async function analyzeStoredDocument(documentId) {
   const sourceChannel = (document.mime_type || "").toLowerCase() === "application/pdf" ? "uploaded_pdf" : "uploaded_document";
   state.ui.ingestPending = true;
   state.ui.ingestResult = null;
+  state.ui.documentApplySummary = null;
   render();
   try {
     const response = await request(`/households/${state.selectedHouseholdId}${API.ingestAnalyze}`, {
@@ -4535,6 +5256,7 @@ async function analyzeIngestForm(form) {
   const inputKind = form.elements.ingest_input_kind.value;
   state.ui.ingestPending = true;
   state.ui.ingestResult = null;
+  state.ui.documentApplySummary = null;
   render();
   try {
     const response = await request(`/households/${state.selectedHouseholdId}${API.ingestAnalyze}`, {
@@ -4588,6 +5310,7 @@ async function promoteIngestSuggestions() {
     state.ui.ingestResult = null;
     state.ui.ingestInput = "";
     state.ui.ingestDocumentId = null;
+    state.ui.documentApplySummary = null;
     showToast(`Skapade ${response.created_drafts.length} reviewutkast.`);
   } finally {
     state.ui.ingestPromoting = false;

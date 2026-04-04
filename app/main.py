@@ -99,7 +99,31 @@ def ensure_household_exists(db: Session, household_id: int):
     return get_object_or_404(db, models.Household, household_id)
 
 
-DOCUMENT_WORKFLOW_STATUS = {"uploaded", "interpreted", "pending_review", "applied", "failed"}
+DOCUMENT_WORKFLOW_STATUS = {
+    "uploaded",
+    "interpreting",
+    "interpreted",
+    "pending_review",
+    "applied",
+    "failed",
+    "rejected",
+    "manual_link_required",
+}
+
+DOCUMENT_STATUS_LABELS = {
+    "uploaded": "Uppladdad",
+    "interpreting": "Tolkas",
+    "interpreted": "Tolkad",
+    "pending_review": "Väntar på granskning",
+    "manual_link_required": "Kräver manuell koppling",
+    "approved": "Godkänd",
+    "applied": "Applicerad",
+    "rejected": "Avvisad",
+    "deferred": "Uppskjuten",
+    "failed": "Misslyckad",
+}
+
+WORKFLOW_STEP_ORDER = ("uploaded", "interpreting", "interpreted", "pending_review", "applied", "failed")
 
 LOAN_REVIEW_FIELD_LABELS = {
     "lender": "Långivare",
@@ -123,6 +147,113 @@ LOAN_REVIEW_FIELD_LABELS = {
 }
 
 
+def _status_label_sv(status: str | None) -> str:
+    return DOCUMENT_STATUS_LABELS.get(status or "", status or "Okänd")
+
+
+def _normalize_entity_text(value: Any) -> str:
+    text = str(value or "").lower().strip()
+    for ch in ".,;:/\\()[]{}<>|\"'":
+        text = text.replace(ch, " ")
+    return " ".join(text.split())
+
+
+def _vehicle_label_from_payload(payload: dict[str, Any]) -> str | None:
+    raw = payload.get("object_vehicle") or payload.get("purpose") or payload.get("label")
+    if not raw:
+        return None
+    return str(raw).strip() or None
+
+
+def _split_vehicle_label(label: str | None) -> tuple[str | None, str | None]:
+    cleaned = " ".join(str(label or "").split()).strip()
+    if not cleaned:
+        return None, None
+    parts = cleaned.split()
+    if len(parts) == 1:
+        return parts[0], None
+    return parts[0], " ".join(parts[1:])
+
+
+def _vehicle_display_label(vehicle: models.Vehicle | None) -> str:
+    if vehicle is None:
+        return "Fordon"
+    parts = [part for part in [vehicle.make, vehicle.model] if part]
+    if parts:
+        return " ".join(parts)
+    return f"Fordon #{vehicle.id}"
+
+
+def _loan_display_label(loan: models.Loan | None) -> str:
+    if loan is None:
+        return "Lån"
+    parts = [part for part in [loan.lender, loan.purpose] if part]
+    if parts:
+        return " · ".join(parts)
+    return f"Lån #{loan.id}"
+
+
+def _draft_review_payload(draft: models.ExtractionDraft) -> dict[str, Any]:
+    review_payload = dict(draft.review_json or {})
+    canonical_payload = dict(draft.proposed_json or {})
+    payload = review_payload or canonical_payload
+    if draft.target_entity_type == "loan":
+        payload = _enrich_loan_payload(dict(canonical_payload), review_payload)
+    return payload
+
+
+def _draft_requires_manual_link(draft: models.ExtractionDraft) -> bool:
+    summary = dict(draft.apply_summary_json or {})
+    if summary.get("manual_actions_required"):
+        return True
+    if summary.get("status") == "manual_review":
+        return True
+    return False
+
+
+def _build_status_steps(workflow_status: str, drafts: list[models.ExtractionDraft]) -> list[schemas.DocumentWorkflowStepRead]:
+    active_index = WORKFLOW_STEP_ORDER.index(workflow_status) if workflow_status in WORKFLOW_STEP_ORDER else 0
+    steps = []
+    for index, key in enumerate(WORKFLOW_STEP_ORDER):
+        steps.append(
+            schemas.DocumentWorkflowStepRead(
+                key=key,
+                label_sv=_status_label_sv(key),
+                active=index == active_index,
+                completed=index < active_index,
+            )
+        )
+    if any(_draft_requires_manual_link(draft) for draft in drafts):
+        steps.append(
+            schemas.DocumentWorkflowStepRead(
+                key="manual_link_required",
+                label_sv="Kräver manuell koppling",
+                active=False,
+                completed=False,
+            )
+        )
+    if any(draft.status == "rejected" for draft in drafts):
+        steps.append(
+            schemas.DocumentWorkflowStepRead(
+                key="rejected",
+                label_sv="Avvisad",
+                active=False,
+                completed=False,
+            )
+        )
+    return steps
+
+
+def _status_label_for_workflow(document: models.Document, drafts: list[models.ExtractionDraft]) -> str:
+    if document.processing_error or any(d.status == "apply_failed" for d in drafts):
+        return "Misslyckad"
+    if any(d.status == "rejected" for d in drafts) and not any(d.status in {"pending_review", "approved"} for d in drafts):
+        return "Avvisad"
+    if any(_draft_requires_manual_link(draft) for draft in drafts):
+        return "Kräver manuell koppling"
+    return _status_label_sv(document.extraction_status)
+
+
 def _status_for_uploaded_document(extracted_text: str | None, extraction_mode: str) -> tuple[str, str | None]:
     if extracted_text and extracted_text.strip():
         return "interpreted", None
@@ -135,11 +266,21 @@ def _draft_status_detail(drafts: list[models.ExtractionDraft]) -> str | None:
     if any(d.status == "apply_failed" for d in drafts):
         failed = next((d for d in drafts if d.status == "apply_failed" and d.review_error), None)
         return failed.review_error if failed else "Ett utkast kunde inte appliceras."
+    if drafts and all(d.status == "rejected" for d in drafts):
+        return "Alla utkast avvisades."
     if any(d.status == "pending_review" for d in drafts):
         count = sum(1 for d in drafts if d.status == "pending_review")
+        if any(_draft_requires_manual_link(d) for d in drafts):
+            return f"{count} utkast väntar på granskning och kräver manuell koppling."
         return f"{count} utkast väntar på granskning."
+    if any(d.status == "deferred" for d in drafts):
+        count = sum(1 for d in drafts if d.status == "deferred")
+        return f"{count} utkast är uppskjutna."
     if any(d.status == "approved" and d.canonical_target_entity_id for d in drafts):
         count = sum(1 for d in drafts if d.status == "approved" and d.canonical_target_entity_id)
+        manual = sum(1 for d in drafts if _draft_requires_manual_link(d))
+        if manual:
+            return f"{count} utkast har applicerats till kanonisk data. {manual} kräver manuell koppling."
         return f"{count} utkast har applicerats till kanonisk data."
     return None
 
@@ -149,8 +290,14 @@ def _derive_document_workflow_status(document: models.Document, drafts: list[mod
         return "failed", document.processing_error
     if any(d.status == "apply_failed" for d in drafts):
         return "failed", _draft_status_detail(drafts)
+    if any(_draft_requires_manual_link(d) for d in drafts):
+        return "manual_link_required", _draft_status_detail(drafts)
     if any(d.status == "pending_review" for d in drafts):
         return "pending_review", _draft_status_detail(drafts)
+    if drafts and all(d.status == "rejected" for d in drafts):
+        return "rejected", _draft_status_detail(drafts)
+    if any(d.status == "deferred" for d in drafts):
+        return "deferred", _draft_status_detail(drafts)
     if any(d.status == "approved" and d.canonical_target_entity_id for d in drafts):
         return "applied", _draft_status_detail(drafts)
     if document.extracted_text:
@@ -193,7 +340,182 @@ def _canonical_target_label(entity_type: str, entity: Any) -> str:
         lender = getattr(entity, "lender", None) or "Lån"
         purpose = getattr(entity, "purpose", None)
         return f"{lender} · {purpose}" if purpose else lender
+    if entity_type == "vehicle":
+        make = getattr(entity, "make", None)
+        model = getattr(entity, "model", None)
+        if make or model:
+            return " ".join(part for part in [make, model] if part)
+        return f"Fordon #{entity.id}"
     return getattr(entity, "name", None) or getattr(entity, "title", None) or f"{entity_type} #{entity.id}"
+
+
+def _load_alias_map(db: Session, household_id: int) -> dict[str, str]:
+    aliases = db.query(models.MerchantAlias).filter_by(household_id=household_id).all()
+    return {(_normalize_entity_text(alias.alias)): alias.canonical_name for alias in aliases if alias.alias}
+
+
+def _normalize_with_aliases(text: str | None, alias_map: dict[str, str]) -> str:
+    normalized = _normalize_entity_text(text)
+    if not normalized:
+        return ""
+    for alias, canonical in alias_map.items():
+        if alias and alias in normalized:
+            normalized = normalized.replace(alias, _normalize_entity_text(canonical))
+    return " ".join(normalized.split())
+
+
+def _score_text_match(candidate_text: str | None, source_text: str | None) -> float:
+    candidate = _normalize_entity_text(candidate_text)
+    source = _normalize_entity_text(source_text)
+    if not candidate or not source:
+        return 0.0
+    if candidate == source:
+        return 1.0
+    if candidate in source or source in candidate:
+        return 0.92
+    candidate_tokens = set(candidate.split())
+    source_tokens = set(source.split())
+    if not candidate_tokens or not source_tokens:
+        return 0.0
+    overlap = len(candidate_tokens & source_tokens) / len(candidate_tokens | source_tokens)
+    return round(overlap, 2)
+
+
+def _vehicle_match_score(vehicle: models.Vehicle, label: str | None, alias_map: dict[str, str]) -> float:
+    vehicle_text = " ".join(part for part in [vehicle.make, vehicle.model] if part)
+    if not vehicle_text:
+        return 0.0
+    normalized_vehicle = _normalize_with_aliases(vehicle_text, alias_map)
+    normalized_label = _normalize_with_aliases(label, alias_map)
+    return max(_score_text_match(normalized_vehicle, normalized_label), _score_text_match(vehicle_text, label))
+
+
+def _loan_match_score(loan: models.Loan, lender: str | None, purpose: str | None, amount: float | None, alias_map: dict[str, str]) -> float:
+    lender_score = _score_text_match(_normalize_with_aliases(loan.lender, alias_map), lender)
+    purpose_score = _score_text_match(loan.purpose, purpose)
+    score = max(lender_score, purpose_score)
+    if amount is not None and loan.required_monthly_payment is not None:
+        diff = abs(float(loan.required_monthly_payment) - float(amount))
+        if diff == 0:
+            score = max(score, 0.9)
+        elif diff <= max(150.0, float(amount) * 0.12):
+            score = max(score, 0.82)
+    return round(score, 2)
+
+
+def _build_document_entity_resolutions(
+    db: Session,
+    document: models.Document,
+    drafts: list[models.ExtractionDraft],
+) -> list[schemas.DocumentEntityResolutionRead]:
+    alias_map = _load_alias_map(db, document.household_id)
+    household_loans = db.query(models.Loan).filter_by(household_id=document.household_id).all()
+    household_vehicles = db.query(models.Vehicle).filter_by(household_id=document.household_id).all()
+    resolutions: list[schemas.DocumentEntityResolutionRead] = []
+
+    for draft in drafts:
+        payload = _draft_review_payload(draft)
+        if draft.target_entity_type != "loan":
+            continue
+
+        lender = payload.get("lender")
+        purpose = payload.get("purpose") or payload.get("object_vehicle")
+        monthly_payment = payload.get("required_monthly_payment") or payload.get("payment_amount")
+        vehicle_label = _vehicle_label_from_payload(payload)
+
+        loan_candidates = sorted(
+            household_loans,
+            key=lambda loan: _loan_match_score(loan, lender, purpose, monthly_payment, alias_map),
+            reverse=True,
+        )
+        loan_candidate_reads = []
+        for loan in loan_candidates[:3]:
+            confidence = _loan_match_score(loan, lender, purpose, monthly_payment, alias_map)
+            if confidence <= 0:
+                continue
+            loan_candidate_reads.append(
+                schemas.DocumentEntityResolutionCandidateRead(
+                    entity_type="loan",
+                    entity_id=loan.id,
+                    label=_loan_display_label(loan),
+                    confidence=confidence,
+                    reason="Liknar leverantör, syfte eller månadskostnad i dokumentet.",
+                    recommended_action="link_existing" if confidence >= 0.8 else "manual_review",
+                )
+            )
+        if (lender or purpose or monthly_payment is not None) and not any(
+            candidate.entity_id is None and candidate.recommended_action == "create_new" for candidate in loan_candidate_reads
+        ):
+            loan_candidate_reads.append(
+                schemas.DocumentEntityResolutionCandidateRead(
+                    entity_type="loan",
+                    entity_id=None,
+                    label=lender or purpose or "Nytt lån",
+                    confidence=0.86 if (lender or purpose) else 0.72,
+                    reason="Skapa ett nytt lån om ingen befintlig post ska uppdateras.",
+                    recommended_action="create_new",
+                )
+            )
+
+        vehicle_candidates = sorted(
+            household_vehicles,
+            key=lambda vehicle: _vehicle_match_score(vehicle, vehicle_label or purpose, alias_map),
+            reverse=True,
+        )
+        vehicle_candidate_reads = []
+        for vehicle in vehicle_candidates[:3]:
+            confidence = _vehicle_match_score(vehicle, vehicle_label or purpose, alias_map)
+            if confidence <= 0:
+                continue
+            vehicle_candidate_reads.append(
+                schemas.DocumentEntityResolutionCandidateRead(
+                    entity_type="vehicle",
+                    entity_id=vehicle.id,
+                    label=_vehicle_display_label(vehicle),
+                    confidence=confidence,
+                    reason="Liknar fordonet som nämns i dokumentet.",
+                    recommended_action="link_existing" if confidence >= 0.75 else "manual_review",
+                )
+            )
+        if (vehicle_label or purpose) and not any(
+            candidate.entity_id is None and candidate.recommended_action == "create_new" for candidate in vehicle_candidate_reads
+        ):
+            vehicle_candidate_reads.append(
+                schemas.DocumentEntityResolutionCandidateRead(
+                    entity_type="vehicle",
+                    entity_id=None,
+                    label=vehicle_label or purpose or "Nytt fordon",
+                    confidence=0.86 if vehicle_label else 0.72,
+                    reason="Skapa ett nytt fordon om ingen befintlig post ska kopplas.",
+                    recommended_action="create_new",
+                )
+            )
+
+        best_loan = loan_candidate_reads[0] if loan_candidate_reads else None
+        best_vehicle = vehicle_candidate_reads[0] if vehicle_candidate_reads else None
+        if best_loan and best_loan.confidence is not None and best_loan.confidence >= 0.85:
+            recommended_action = "link_existing"
+            reason = "Det finns redan ett tydligt matchande lån."
+        elif best_vehicle and best_vehicle.confidence is not None and best_vehicle.confidence >= 0.8:
+            recommended_action = "create_new"
+            reason = "Dokumentet pekar tydligt på ett fordon, men lånet verkar sakna stabil träff."
+        else:
+            recommended_action = "manual_review" if loan_candidate_reads or vehicle_candidate_reads else "create_new"
+            reason = "Systemet har för få säkra signaler för att koppla automatiskt."
+
+        resolutions.append(
+            schemas.DocumentEntityResolutionRead(
+                draft_id=draft.id,
+                primary_entity_type="loan",
+                recommended_action=recommended_action,
+                confidence=best_loan.confidence if best_loan else (best_vehicle.confidence if best_vehicle else None),
+                reason=reason,
+                loan_candidates=loan_candidate_reads,
+                vehicle_candidates=vehicle_candidate_reads,
+            )
+        )
+
+    return resolutions
 
 
 def _build_document_key_fields(document: models.Document, drafts: list[models.ExtractionDraft], db: Session) -> list[schemas.DocumentKeyFieldRead]:
@@ -230,7 +552,7 @@ def _build_document_key_fields(document: models.Document, drafts: list[models.Ex
             add_field("amount", "Belopp", payload.get("amount") or payload.get("current_monthly_cost"), source)
 
         if draft.canonical_target_entity_type and draft.canonical_target_entity_id:
-            model_map = {"loan": models.Loan}
+            model_map = {"loan": models.Loan, "vehicle": models.Vehicle}
             model_class = model_map.get(draft.canonical_target_entity_type)
             if model_class is not None:
                 entity = db.get(model_class, draft.canonical_target_entity_id)
@@ -238,6 +560,18 @@ def _build_document_key_fields(document: models.Document, drafts: list[models.Ex
                     add_field("canonical_lender", "Kopplat lån", _canonical_target_label("loan", entity), "canonical_record")
                     add_field("canonical_current_balance", "Aktuell skuld", getattr(entity, "current_balance", None), "canonical_record")
                     add_field("canonical_required_monthly_payment", "Månad att betala", getattr(entity, "required_monthly_payment", None), "canonical_record")
+                if entity is not None and draft.canonical_target_entity_type == "vehicle":
+                    add_field("canonical_vehicle", "Kopplat fordon", _canonical_target_label("vehicle", entity), "canonical_record")
+                    owner = db.get(models.Person, getattr(entity, "owner_person_id", None)) if getattr(entity, "owner_person_id", None) else None
+                    add_field("canonical_vehicle_owner", "Fordonsägare", getattr(owner, "name", None), "canonical_record")
+        if draft.apply_summary_json:
+            summary = dict(draft.apply_summary_json)
+            for mutation in summary.get("mutations", []):
+                entity_type = mutation.get("entity_type")
+                label = mutation.get("label")
+                summary_text = mutation.get("summary_sv")
+                if entity_type and label:
+                    add_field(f"apply_{entity_type}", f"Applicerat {entity_type}", f"{label} · {summary_text}", "canonical_record")
     return key_fields
 
 
@@ -249,12 +583,22 @@ def _build_document_workflow_read(db: Session, document: models.Document) -> sch
         .all()
     )
     status_value, detail = _derive_document_workflow_status(document, drafts)
+    entity_resolutions = _build_document_entity_resolutions(db, document, drafts)
+    if status_value == "pending_review" and any(
+        resolution.recommended_action == "manual_review" for resolution in entity_resolutions
+    ):
+        status_value = "manual_link_required"
+        detail = "Dokumentet väntar på ditt val för att kopplas till rätt objekt."
     document.extraction_status = status_value
     canonical_links: list[schemas.CanonicalLinkRead] = []
+    latest_apply_summary: dict[str, Any] | None = None
+    seen_links: set[tuple[str, int]] = set()
     for draft in drafts:
         if not draft.canonical_target_entity_type or not draft.canonical_target_entity_id:
+            if draft.apply_summary_json and latest_apply_summary is None:
+                latest_apply_summary = dict(draft.apply_summary_json)
             continue
-        model_map = {"loan": models.Loan}
+        model_map = {"loan": models.Loan, "vehicle": models.Vehicle}
         model_class = model_map.get(draft.canonical_target_entity_type)
         entity = db.get(model_class, draft.canonical_target_entity_id) if model_class is not None else None
         target_label = _canonical_target_label(draft.canonical_target_entity_type, entity) if entity is not None else f"{draft.canonical_target_entity_type} #{draft.canonical_target_entity_id}"
@@ -267,14 +611,57 @@ def _build_document_workflow_read(db: Session, document: models.Document) -> sch
                 applied_at=draft.applied_at,
             )
         )
+        seen_links.add((draft.canonical_target_entity_type, draft.canonical_target_entity_id))
+        if draft.canonical_target_entity_type == "loan":
+            linked_vehicle = (
+                db.query(models.Vehicle)
+                .filter_by(household_id=document.household_id, loan_id=draft.canonical_target_entity_id)
+                .order_by(models.Vehicle.id.asc())
+                .first()
+            )
+            if linked_vehicle is not None and ("vehicle", linked_vehicle.id) not in seen_links:
+                canonical_links.append(
+                    schemas.CanonicalLinkRead(
+                        draft_id=draft.id,
+                        target_entity_type="vehicle",
+                        target_entity_id=linked_vehicle.id,
+                        target_label=_canonical_target_label("vehicle", linked_vehicle),
+                        applied_at=draft.applied_at,
+                    )
+                )
+                seen_links.add(("vehicle", linked_vehicle.id))
+        if draft.apply_summary_json and latest_apply_summary is None:
+            latest_apply_summary = dict(draft.apply_summary_json)
+
+    if latest_apply_summary is not None:
+        latest_apply_summary.setdefault("document_id", document.id)
+        latest_apply_summary.setdefault(
+            "applied_at",
+            drafts[0].applied_at if drafts and drafts[0].applied_at else document.uploaded_at,
+        )
+
+    recommended_actions = ["Granska extraherade nyckelfält"]
+    if entity_resolutions:
+        if any(resolution.loan_candidates for resolution in entity_resolutions):
+            recommended_actions.append("Bekräfta vilket lån som ska uppdateras eller om ett nytt lån ska skapas")
+        if any(_vehicle_label_from_payload(_draft_review_payload(draft)) for draft in drafts if draft.target_entity_type == "loan"):
+            recommended_actions.append("Bekräfta om fordonet ska kopplas till befintligt eller nytt fordon")
+    else:
+        recommended_actions.append("Ladda upp eller tolka dokumentet för att se förslag")
 
     return schemas.DocumentWorkflowRead(
         document=document,
         workflow_status=status_value,
         status_detail=detail,
+        status_label_sv=_status_label_for_workflow(document, drafts),
+        status_steps=_build_status_steps(status_value, drafts),
         drafts=drafts,
         key_fields=_build_document_key_fields(document, drafts, db),
         canonical_links=canonical_links,
+        entity_resolutions=entity_resolutions,
+        apply_summary=latest_apply_summary,
+        recommended_actions=recommended_actions,
+        requires_manual_link=status_value == "manual_link_required" or any(_draft_requires_manual_link(draft) for draft in drafts),
     )
 
 
@@ -312,6 +699,635 @@ def _enrich_loan_payload(canonical_payload: dict[str, Any], review_payload: dict
         payload["due_day"] = parsed_due_date.day
     payload["note"] = _append_loan_note(payload.get("note"), review_payload)
     return payload
+
+
+def _pick_draft_action(
+    request_body: schemas.DocumentApplyRequest,
+    draft: models.ExtractionDraft,
+    resolution: schemas.DocumentEntityResolutionRead | None,
+) -> schemas.DocumentDraftApplySelection | None:
+    explicit = next((item for item in request_body.draft_actions if item.draft_id == draft.id), None)
+    if explicit is not None:
+        return explicit
+    if resolution is not None and resolution.recommended_action == "manual_review":
+        return None
+    if (
+        resolution is not None
+        and resolution.recommended_action == "link_existing"
+        and resolution.loan_candidates
+        and resolution.loan_candidates[0].entity_id is not None
+    ):
+        return schemas.DocumentDraftApplySelection(
+            draft_id=draft.id,
+            action="link_existing",
+            target_entity_id=resolution.loan_candidates[0].entity_id,
+            proposed_json=request_body.proposed_json,
+        )
+    return schemas.DocumentDraftApplySelection(
+        draft_id=draft.id,
+        action=request_body.action,
+        target_entity_id=request_body.target_entity_id,
+        proposed_json=request_body.proposed_json,
+    )
+
+
+def _pick_related_action(
+    request_body: schemas.DocumentApplyRequest,
+    draft: models.ExtractionDraft,
+    resolution: schemas.DocumentEntityResolutionRead | None,
+    payload: dict[str, Any],
+) -> schemas.RelatedEntityApplySelection | None:
+    explicit = next((item for item in request_body.related_actions if item.source_draft_id == draft.id), None)
+    if explicit is not None:
+        return explicit
+    vehicle_label = _vehicle_label_from_payload(payload)
+    if not vehicle_label:
+        return None
+    if resolution is None:
+        return schemas.RelatedEntityApplySelection(
+            source_draft_id=draft.id,
+            entity_type="vehicle",
+            action="create_new",
+        )
+    best_vehicle = resolution.vehicle_candidates[0] if resolution.vehicle_candidates else None
+    if best_vehicle and best_vehicle.recommended_action == "link_existing" and best_vehicle.entity_id is not None:
+        return schemas.RelatedEntityApplySelection(
+            source_draft_id=draft.id,
+            entity_type="vehicle",
+            action="link_existing",
+            target_entity_id=best_vehicle.entity_id,
+        )
+    create_new_candidate = next(
+        (
+            candidate
+            for candidate in (resolution.vehicle_candidates if resolution else [])
+            if candidate.recommended_action == "create_new" and candidate.entity_id is None
+        ),
+        None,
+    )
+    if create_new_candidate is not None:
+        return schemas.RelatedEntityApplySelection(
+            source_draft_id=draft.id,
+            entity_type="vehicle",
+            action="create_new",
+        )
+    if resolution.recommended_action == "manual_review" and resolution.vehicle_candidates:
+        return None
+    if request_body.related_actions:
+        return None
+    return schemas.RelatedEntityApplySelection(
+        source_draft_id=draft.id,
+        entity_type="vehicle",
+        action="create_new",
+    )
+
+
+def _apply_non_loan_draft(
+    db: Session,
+    *,
+    draft: models.ExtractionDraft,
+    document: models.Document,
+    selection: schemas.DocumentDraftApplySelection,
+) -> tuple[Any, str]:
+    (schema_class, model_class), normalized = draft_target_config(draft.target_entity_type)
+    proposed = dict(draft.proposed_json or {})
+    if selection.proposed_json:
+        proposed.update(selection.proposed_json)
+    if "household_id" in getattr(schema_class, "__fields__", {}) and "household_id" not in proposed:
+        proposed["household_id"] = draft.household_id
+    if selection.action == "link_existing":
+        raise HTTPException(status_code=400, detail="Befintlig koppling stöds bara för lån i dokumentpaket-flödet.")
+    payload = schema_class(**proposed)
+    entity = model_class(**payload.dict())
+    db.add(entity)
+    db.flush()
+    if normalized == "document":
+        document.processing_error = None
+    return entity, normalized
+
+
+def _summarize_mutation(entity_type: str, action: str, label: str) -> str:
+    if entity_type == "loan":
+        if action == "created":
+            return f"Skapade lån: {label}."
+        return f"Uppdaterade lån: {label}."
+    if entity_type == "vehicle":
+        if action == "created":
+            return f"Skapade fordon: {label}."
+        if action == "linked":
+            return f"Kopplade fordon: {label}."
+        return f"Uppdaterade fordon: {label}."
+    if action == "skipped":
+        return f"Hoppade över: {label}."
+    return f"Applicerade {entity_type}: {label}."
+
+
+def _apply_document_package(
+    db: Session,
+    *,
+    document: models.Document,
+    drafts: list[models.ExtractionDraft],
+    request_body: schemas.DocumentApplyRequest,
+) -> schemas.DocumentApplySummaryRead:
+    if not drafts:
+        raise HTTPException(status_code=400, detail="Dokumentet saknar utkast att applicera.")
+
+    selected_ids = set(request_body.draft_ids or [draft.id for draft in drafts if draft.status in {"pending_review", "deferred"}])
+    selected_drafts = [draft for draft in drafts if draft.id in selected_ids]
+    if not selected_drafts:
+        raise HTTPException(status_code=400, detail="Inga applicerbara utkast valdes.")
+
+    resolution_map = {item.draft_id: item for item in _build_document_entity_resolutions(db, document, selected_drafts)}
+    mutations: list[dict[str, Any]] = []
+    manual_actions_required: list[str] = []
+    applied_at = datetime.utcnow()
+
+    try:
+        for draft in selected_drafts:
+            resolution = resolution_map.get(draft.id)
+            selection = _pick_draft_action(request_body, draft, resolution)
+            payload = _draft_review_payload(draft)
+
+            if selection is None:
+                manual_actions_required.append("Välj om lånet ska kopplas till befintligt lån eller skapas som nytt.")
+                mutations.append(
+                    {
+                        "entity_type": "draft",
+                        "action": "manual_review",
+                        "entity_id": draft.id,
+                        "label": f"Draft #{draft.id}",
+                        "summary_sv": "Kräver att du väljer rätt lån innan något skrivs.",
+                    }
+                )
+                continue
+
+            if selection.action == "skip":
+                draft.status = "rejected"
+                draft.review_error = None
+                draft.applied_at = applied_at
+                mutations.append(
+                    {
+                        "entity_type": "draft",
+                        "action": "skipped",
+                        "entity_id": draft.id,
+                        "label": f"Draft #{draft.id}",
+                        "summary_sv": "Utkastet avvisades och skrevs inte till hushållets data.",
+                    }
+                )
+                continue
+
+            if draft.target_entity_type == "loan":
+                proposed = dict(draft.proposed_json or {})
+                if selection.proposed_json:
+                    proposed.update(selection.proposed_json)
+                proposed = _enrich_loan_payload(proposed, dict(draft.review_json or {}))
+                if "household_id" not in proposed:
+                    proposed["household_id"] = draft.household_id
+
+                if selection.action == "link_existing":
+                    loan_entity = get_object_or_404(db, models.Loan, selection.target_entity_id)
+                    if loan_entity.household_id != draft.household_id:
+                        raise HTTPException(status_code=400, detail="Lånet tillhör ett annat hushåll.")
+                    loan_payload = schemas.LoanUpdate(**proposed)
+                    for field, value in loan_payload.dict(exclude_unset=True, exclude_none=True).items():
+                        setattr(loan_entity, field, value)
+                    loan_action = "updated"
+                else:
+                    loan_payload = schemas.LoanCreate(**proposed)
+                    loan_entity = models.Loan(**loan_payload.dict())
+                    db.add(loan_entity)
+                    db.flush()
+                    loan_action = "created"
+
+                loan_entity.statement_doc_id = document.id
+                draft.status = "approved"
+                draft.canonical_target_entity_type = "loan"
+                draft.canonical_target_entity_id = loan_entity.id
+                draft.review_error = None
+                draft.applied_at = applied_at
+                mutations.append(
+                    {
+                        "entity_type": "loan",
+                        "action": loan_action,
+                        "entity_id": loan_entity.id,
+                        "label": _loan_display_label(loan_entity),
+                        "summary_sv": _summarize_mutation("loan", loan_action, _loan_display_label(loan_entity)),
+                    }
+                )
+
+                related_action = _pick_related_action(request_body, draft, resolution, payload)
+                vehicle_label = _vehicle_label_from_payload(payload)
+                if vehicle_label and related_action is None:
+                    manual_actions_required.append("Bekräfta om dokumentet ska kopplas till befintligt fordon, skapa nytt fordon eller hoppas över.")
+                    mutations.append(
+                        {
+                            "entity_type": "draft",
+                            "action": "manual_review",
+                            "entity_id": draft.id,
+                            "label": vehicle_label,
+                            "summary_sv": "Fordonet kräver manuell koppling innan hela objektkedjan är komplett.",
+                        }
+                    )
+                elif vehicle_label and related_action is not None:
+                    if related_action.action == "link_existing":
+                        vehicle = get_object_or_404(db, models.Vehicle, related_action.target_entity_id)
+                        if vehicle.household_id != draft.household_id:
+                            raise HTTPException(status_code=400, detail="Fordonet tillhör ett annat hushåll.")
+                        vehicle.loan_id = loan_entity.id
+                        if loan_entity.person_id and vehicle.owner_person_id is None:
+                            vehicle.owner_person_id = loan_entity.person_id
+                        vehicle_action = "linked"
+                    elif related_action.action == "create_new":
+                        make, model = _split_vehicle_label(vehicle_label)
+                        vehicle = models.Vehicle(
+                            household_id=draft.household_id,
+                            owner_person_id=loan_entity.person_id,
+                            make=make,
+                            model=model,
+                            loan_id=loan_entity.id,
+                            note=f"Skapad från dokument {document.file_name}",
+                        )
+                        db.add(vehicle)
+                        db.flush()
+                        vehicle_action = "created"
+                    else:
+                        mutations.append(
+                            {
+                                "entity_type": "vehicle",
+                                "action": "skipped",
+                                "entity_id": None,
+                                "label": vehicle_label,
+                                "summary_sv": _summarize_mutation("vehicle", "skipped", vehicle_label),
+                            }
+                        )
+                        vehicle = None
+                        vehicle_action = "skipped"
+
+                    if vehicle_action in {"created", "linked"} and vehicle is not None:
+                        mutations.append(
+                            {
+                                "entity_type": "vehicle",
+                                "action": vehicle_action,
+                                "entity_id": vehicle.id,
+                                "label": _vehicle_display_label(vehicle),
+                                "summary_sv": _summarize_mutation("vehicle", vehicle_action, _vehicle_display_label(vehicle)),
+                            }
+                        )
+            else:
+                entity, normalized = _apply_non_loan_draft(
+                    db,
+                    draft=draft,
+                    document=document,
+                    selection=selection,
+                )
+                draft.status = "approved"
+                draft.canonical_target_entity_type = normalized
+                draft.canonical_target_entity_id = entity.id
+                draft.review_error = None
+                draft.applied_at = applied_at
+                mutations.append(
+                    {
+                        "entity_type": "draft",
+                        "action": "created",
+                        "entity_id": draft.id,
+                        "label": draft.target_entity_type,
+                        "summary_sv": f"Skapade {draft.target_entity_type} från dokumentet.",
+                    }
+                )
+
+        summary_status = "manual_review"
+        approved_any = any(draft.status == "approved" for draft in selected_drafts)
+        if approved_any and manual_actions_required:
+            summary_status = "partial"
+        elif approved_any:
+            summary_status = "applied"
+
+        summary = schemas.DocumentApplySummaryRead(
+            document_id=document.id,
+            draft_id=selected_drafts[0].id if selected_drafts else None,
+            status=summary_status,
+            message_sv=(
+                "Dokumentet applicerades till hushållets data."
+                if summary_status == "applied"
+                else "Dokumentet applicerades delvis. Några kopplingar kräver fortfarande manuell kontroll."
+                if summary_status == "partial"
+                else "Dokumentet kräver manuell koppling innan allt kan appliceras säkert."
+            ),
+            manual_actions_required=manual_actions_required,
+            mutations=mutations,
+            applied_at=applied_at,
+        )
+        summary_dict = summary.dict()
+        summary_dict["applied_at"] = applied_at.isoformat()
+        for draft in selected_drafts:
+            draft.apply_summary_json = summary_dict
+        _update_document_workflow_status(document)
+        db.commit()
+        return summary
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as exc:
+        db.rollback()
+        for draft in selected_drafts:
+            draft.status = "apply_failed"
+            draft.review_error = str(exc)
+        document.extraction_status = "failed"
+        document.processing_error = str(exc)
+        db.commit()
+        raise HTTPException(status_code=400, detail=f"Dokumentet kunde inte appliceras: {exc}") from exc
+
+
+def _best_vehicle_for_loan(db: Session, household_id: int, vehicle_label: str | None) -> tuple[models.Vehicle | None, float]:
+    if not vehicle_label:
+        return None, 0.0
+    alias_map = _load_alias_map(db, household_id)
+    vehicles = db.query(models.Vehicle).filter_by(household_id=household_id).all()
+    best_vehicle: models.Vehicle | None = None
+    best_score = 0.0
+    for vehicle in vehicles:
+        score = _vehicle_match_score(vehicle, vehicle_label, alias_map)
+        if score > best_score:
+            best_vehicle = vehicle
+            best_score = score
+    return best_vehicle, round(best_score, 2)
+
+
+def _upsert_vehicle_link_for_loan(
+    db: Session,
+    loan: models.Loan,
+    *,
+    household_id: int,
+    review_payload: dict[str, Any],
+    related_action: schemas.RelatedEntityApplySelection | None = None,
+) -> tuple[dict[str, Any] | None, list[str]]:
+    manual_actions: list[str] = []
+    vehicle_label = _vehicle_label_from_payload(review_payload)
+    action = related_action.action if related_action is not None else None
+    override_payload = dict(related_action.proposed_json or {}) if related_action is not None else {}
+
+    if not vehicle_label:
+        return (
+            {
+                "entity_type": "vehicle",
+                "action": "skipped",
+                "entity_id": None,
+                "label": "Fordon",
+                "summary_sv": "Dokumentet nämner inget tydligt fordon, så ingen fordonskoppling gjordes.",
+            },
+            manual_actions,
+        )
+
+    best_vehicle, confidence = _best_vehicle_for_loan(db, household_id, vehicle_label)
+    make, model = _split_vehicle_label(vehicle_label)
+    make = override_payload.get("make") or make
+    model = override_payload.get("model") or model
+    owner_person_id = override_payload.get("owner_person_id", loan.person_id)
+
+    if action == "skip":
+        return (
+            {
+                "entity_type": "vehicle",
+                "action": "skipped",
+                "entity_id": None,
+                "label": vehicle_label,
+                "summary_sv": "Fordonskopplingen hoppades över i detta steg.",
+            },
+            manual_actions,
+        )
+
+    if action == "link_existing":
+        target_vehicle = get_object_or_404(db, models.Vehicle, related_action.target_entity_id)
+        if target_vehicle.household_id != household_id:
+            raise HTTPException(status_code=400, detail="Fordonet tillhör ett annat hushåll.")
+        target_vehicle.loan_id = loan.id
+        if not target_vehicle.make and make:
+            target_vehicle.make = make
+        if not target_vehicle.model and model:
+            target_vehicle.model = model
+        if not target_vehicle.owner_person_id and owner_person_id:
+            target_vehicle.owner_person_id = owner_person_id
+        return (
+            {
+                "entity_type": "vehicle",
+                "action": "linked",
+                "entity_id": target_vehicle.id,
+                "label": _vehicle_display_label(target_vehicle),
+                "summary_sv": "Kopplade valt fordon till lånet.",
+            },
+            manual_actions,
+        )
+
+    if action == "create_new":
+        vehicle = models.Vehicle(
+            household_id=household_id,
+            owner_person_id=owner_person_id,
+            make=make,
+            model=model,
+            loan_id=loan.id,
+        )
+        db.add(vehicle)
+        db.flush()
+        return (
+            {
+                "entity_type": "vehicle",
+                "action": "created",
+                "entity_id": vehicle.id,
+                "label": _vehicle_display_label(vehicle),
+                "summary_sv": "Skapade och kopplade ett nytt fordon utifrån dokumentets uppgifter.",
+            },
+            manual_actions,
+        )
+
+    if best_vehicle and confidence >= 0.75:
+        best_vehicle.loan_id = loan.id
+        if not best_vehicle.make and make:
+            best_vehicle.make = make
+        if not best_vehicle.model and model:
+            best_vehicle.model = model
+        return (
+            {
+                "entity_type": "vehicle",
+                "action": "linked",
+                "entity_id": best_vehicle.id,
+                "label": _vehicle_display_label(best_vehicle),
+                "summary_sv": f"Kopplade befintligt fordon till lånet med träffsäkerhet {round(confidence * 100)}%.",
+            },
+            manual_actions,
+        )
+
+    vehicle = models.Vehicle(
+        household_id=household_id,
+        owner_person_id=owner_person_id,
+        make=make,
+        model=model,
+        loan_id=loan.id,
+    )
+    db.add(vehicle)
+    db.flush()
+    return (
+        {
+            "entity_type": "vehicle",
+            "action": "created",
+            "entity_id": vehicle.id,
+            "label": _vehicle_display_label(vehicle),
+            "summary_sv": "Skapade och kopplade ett nytt fordon utifrån dokumentets uppgifter.",
+        },
+        manual_actions,
+    )
+
+
+def _build_apply_summary(
+    *,
+    document: models.Document,
+    draft: models.ExtractionDraft,
+    mutations: list[dict[str, Any]],
+    manual_actions_required: list[str],
+    status: str,
+    message_sv: str,
+    applied_at: datetime,
+) -> dict[str, Any]:
+    return {
+        "document_id": document.id,
+        "draft_id": draft.id,
+        "status": status,
+        "message_sv": message_sv,
+        "manual_actions_required": manual_actions_required,
+        "mutations": mutations,
+        "applied_at": applied_at.isoformat(),
+    }
+
+
+def _default_related_action_for_resolution(
+    draft: models.ExtractionDraft,
+    resolution: schemas.DocumentEntityResolutionRead | None,
+) -> schemas.RelatedEntityApplySelection | None:
+    if draft.target_entity_type != "loan":
+        return None
+    vehicle_label = _vehicle_label_from_payload(_draft_review_payload(draft))
+    if not vehicle_label:
+        return None
+    best_vehicle = resolution.vehicle_candidates[0] if resolution and resolution.vehicle_candidates else None
+    if best_vehicle and best_vehicle.entity_id is not None and (best_vehicle.confidence or 0.0) >= 0.75:
+        return schemas.RelatedEntityApplySelection(
+            source_draft_id=draft.id,
+            entity_type="vehicle",
+            action="link_existing",
+            target_entity_id=best_vehicle.entity_id,
+        )
+    if resolution and resolution.vehicle_candidates:
+        return None
+    return schemas.RelatedEntityApplySelection(
+        source_draft_id=draft.id,
+        entity_type="vehicle",
+        action="create_new",
+    )
+
+
+def _apply_single_draft(
+    db: Session,
+    draft: models.ExtractionDraft,
+    document: models.Document,
+    request_body: schemas.ExtractionDraftApplyRequest,
+    related_action: schemas.RelatedEntityApplySelection | None = None,
+) -> dict[str, Any]:
+    (schema_class, model_class), normalized = draft_target_config(draft.target_entity_type)
+    proposed = dict(draft.proposed_json or {})
+    review_payload = dict(draft.review_json or {})
+    if request_body.proposed_json:
+        proposed.update(request_body.proposed_json)
+    if normalized == "loan":
+        proposed = _enrich_loan_payload(proposed, review_payload)
+    if "household_id" in getattr(schema_class, "__fields__", {}) and "household_id" not in proposed:
+        proposed["household_id"] = draft.household_id
+
+    mutations: list[dict[str, Any]] = []
+    manual_actions_required: list[str] = []
+    now = datetime.utcnow()
+
+    try:
+        if request_body.action == "link_existing":
+            if normalized != "loan":
+                raise HTTPException(status_code=400, detail="Befintlig koppling stöds bara för lån i nuvarande review-flöde.")
+            entity = get_object_or_404(db, models.Loan, request_body.target_entity_id)
+            if entity.household_id != draft.household_id:
+                raise HTTPException(status_code=400, detail="Lånet tillhör ett annat hushåll.")
+            payload = schemas.LoanUpdate(**proposed)
+            update_data = payload.dict(exclude_unset=True, exclude_none=True)
+            for field, value in update_data.items():
+                setattr(entity, field, value)
+            mutations.append(
+                {
+                    "entity_type": "loan",
+                    "action": "updated",
+                    "entity_id": entity.id,
+                    "label": _loan_display_label(entity),
+                    "summary_sv": "Uppdaterade befintligt lån med dokumentets fält.",
+                }
+            )
+        else:
+            payload = schema_class(**proposed)
+            entity = model_class(**payload.dict())
+            db.add(entity)
+            db.flush()
+            mutations.append(
+                {
+                    "entity_type": normalized,
+                    "action": "created",
+                    "entity_id": entity.id,
+                    "label": _canonical_target_label(normalized, entity),
+                    "summary_sv": "Skapade en ny kanonisk post från dokumentet.",
+                }
+            )
+
+        if normalized == "loan":
+            vehicle_mutation, vehicle_manual_actions = _upsert_vehicle_link_for_loan(
+                db,
+                entity,
+                household_id=draft.household_id,
+                review_payload=review_payload,
+                related_action=related_action,
+            )
+            if vehicle_mutation is not None:
+                mutations.append(vehicle_mutation)
+            manual_actions_required.extend(vehicle_manual_actions)
+            entity.statement_doc_id = document.id
+
+        draft.status = "approved"
+        draft.canonical_target_entity_type = normalized
+        draft.canonical_target_entity_id = entity.id
+        draft.review_error = None
+        draft.applied_at = now
+        draft.apply_summary_json = _build_apply_summary(
+            document=document,
+            draft=draft,
+            mutations=mutations,
+            manual_actions_required=manual_actions_required,
+            status="partial" if manual_actions_required else "applied",
+            message_sv="Dokumentet applicerades."
+            if not manual_actions_required
+            else "Dokumentet applicerades men kräver en manuell fordonskoppling.",
+            applied_at=now,
+        )
+        _update_document_workflow_status(document)
+        return {
+            "draft_id": draft.id,
+            "target_entity_type": normalized,
+            "target_entity_id": entity.id,
+            "status": draft.status,
+            "summary": draft.apply_summary_json["message_sv"],
+            "applied_entities": mutations,
+            "manual_actions_required": manual_actions_required,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        draft.status = "apply_failed"
+        draft.review_error = str(exc)
+        document.extraction_status = "failed"
+        document.processing_error = str(exc)
+        db.commit()
+        raise HTTPException(status_code=400, detail=f"Draft kunde inte appliceras: {exc}") from exc
 
 
 def upload_to_disk(household_id: int, file: UploadFile) -> tuple[str, str, bytes]:
@@ -949,6 +1965,37 @@ def read_document_review(doc_id: int, db: Session = Depends(get_db)):
     return _build_document_workflow_read(db, document)
 
 
+@app.post("/documents/{doc_id}/apply", response_model=schemas.DocumentApplyResponse)
+def apply_document_review(
+    doc_id: int,
+    request_body: schemas.DocumentApplyRequest | None = Body(None),
+    db: Session = Depends(get_db),
+):
+    document = get_object_or_404(db, models.Document, doc_id)
+    request_body = request_body or schemas.DocumentApplyRequest()
+    drafts = (
+        db.query(models.ExtractionDraft)
+        .filter_by(document_id=document.id)
+        .order_by(models.ExtractionDraft.created_at.asc())
+        .all()
+    )
+    summary = _apply_document_package(
+        db,
+        document=document,
+        drafts=drafts,
+        request_body=request_body,
+    )
+    db.refresh(document)
+    workflow = _build_document_workflow_read(db, document)
+    return schemas.DocumentApplyResponse(
+        document_id=document.id,
+        workflow_status=workflow.workflow_status,
+        status_label_sv=workflow.status_label_sv,
+        apply_summary=summary,
+        workflow=workflow,
+    )
+
+
 @app.get("/documents/{doc_id}/download", include_in_schema=False)
 def download_document(doc_id: int, db: Session = Depends(get_db)):
     document = get_object_or_404(db, models.Document, doc_id)
@@ -1028,49 +2075,17 @@ def apply_extraction_draft(
         raise HTTPException(status_code=400, detail="Draft already approved")
     request_body = request_body or schemas.ExtractionDraftApplyRequest()
     document = get_object_or_404(db, models.Document, draft.document_id)
-
-    (schema_class, model_class), normalized = draft_target_config(draft.target_entity_type)
-    proposed = dict(draft.proposed_json or {})
-    review_payload = dict(draft.review_json or {})
-    if request_body.proposed_json:
-        proposed.update(request_body.proposed_json)
-    if normalized == "loan":
-        proposed = _enrich_loan_payload(proposed, review_payload)
-    if "household_id" in getattr(schema_class, "__fields__", {}) and "household_id" not in proposed:
-        proposed["household_id"] = draft.household_id
     try:
-        if request_body.action == "link_existing":
-            if normalized != "loan":
-                raise HTTPException(status_code=400, detail="Befintlig koppling stöds bara för lån i nuvarande review-flöde.")
-            entity = get_object_or_404(db, models.Loan, request_body.target_entity_id)
-            if entity.household_id != draft.household_id:
-                raise HTTPException(status_code=400, detail="Lånet tillhör ett annat hushåll.")
-            payload = schemas.LoanUpdate(**proposed)
-            for field, value in payload.dict(exclude_unset=True, exclude_none=True).items():
-                setattr(entity, field, value)
-        else:
-            payload = schema_class(**proposed)
-            entity = model_class(**payload.dict())
-            db.add(entity)
-            db.flush()
-        draft.status = "approved"
-        draft.canonical_target_entity_type = normalized
-        draft.canonical_target_entity_id = entity.id
-        draft.review_error = None
-        draft.applied_at = datetime.utcnow()
-        if normalized == "loan":
-            entity.statement_doc_id = document.id
-        _update_document_workflow_status(document)
+        response_payload = _apply_single_draft(db, draft, document, request_body)
         db.commit()
-        return {
-            "draft_id": draft.id,
-            "target_entity_type": normalized,
-            "target_entity_id": entity.id,
-            "status": draft.status,
-        }
+        db.refresh(draft)
+        db.refresh(document)
+        return response_payload
     except HTTPException:
+        db.rollback()
         raise
     except Exception as exc:
+        db.rollback()
         draft.status = "apply_failed"
         draft.review_error = str(exc)
         document.extraction_status = "failed"

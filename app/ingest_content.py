@@ -61,7 +61,7 @@ class TesseractOCRExtractor:
 
     def extract_text(self, raw: bytes, *, file_name: str | None = None, mime_type: str | None = None) -> ExtractedText:
         try:
-            from PIL import Image
+            from PIL import Image, ImageOps
             import pytesseract
         except ImportError:
             return ExtractedText(
@@ -80,7 +80,11 @@ class TesseractOCRExtractor:
             )
 
         try:
-            ocr_text = pytesseract.image_to_string(image, lang="swe+eng", config="--psm 6")
+            prepared = ImageOps.grayscale(image)
+            if prepared.width < 2200:
+                scale = max(2, int(round(2200 / max(prepared.width, 1))))
+                prepared = prepared.resize((prepared.width * scale, prepared.height * scale))
+            ocr_text = pytesseract.image_to_string(prepared, lang="swe+eng", config="--psm 6")
         except pytesseract.TesseractNotFoundError:
             return ExtractedText(
                 text=None,
