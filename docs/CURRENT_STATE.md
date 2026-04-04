@@ -172,18 +172,34 @@ Current Data-In input paths:
 - copy-pasted PDF text (with enhanced normalization for PDF-paste artifacts)
 - uploaded documents with extractable text (PDF text extraction, plain text files)
 - uploaded documents analyzed via document_id reference
+- uploaded images/screenshots with OCR text extraction (Tesseract swe+eng)
+- scanned PDFs with OCR fallback (no text layer → page images → Tesseract)
+- LF-style bank copy-paste with conservative batch grouping
 
 Pre-processing before AI:
 
 - text normalization: NBSP, zero-width spaces, form feeds, excessive whitespace
 - input hint detection: invoice keywords, subscription keywords, bank statement keywords, Swedish amounts, ISO dates, VAT, monthly cost patterns
 - truncation at 6000 characters with explicit note
+- OCR via Tesseract for images and scanned PDFs
 
 Screenshot/image OCR:
 
-- `OCRExtractor` protocol exists as a prepared interface in `app/ingest_content.py`
-- `image_placeholder` source channel returns explicit 501 "not implemented"
-- no actual OCR implementation exists yet
+- `TesseractOCRExtractor` in `app/ingest_content.py` provides real OCR via Tesseract (swe+eng)
+- `image` source channel is fully supported
+- scanned PDFs (no extractable text) fall back to page-image OCR
+- OCR text includes confidence notes and can contain reading errors
+- system dependency: `tesseract-ocr`, `tesseract-ocr-swe`; Python: `pytesseract`, `Pillow`
+
+Document classification types:
+
+- `subscription_contract`: abonnemang, avtal
+- `invoice`: faktura
+- `recurring_cost_candidate`: trolig återkommande kostnad
+- `transfer_or_saving_candidate`: trolig överföring/sparande
+- `bank_row_batch`: LF-style kontoutdrag med flera rader
+- `financial_note`: generell finansiell anteckning
+- `unclear`: oklart underlag
 
 ## What Does Not Exist
 
@@ -200,7 +216,6 @@ These are not implemented in the current code:
 - object storage
 - `POST /demo/seed`
 - provider abstraction beyond direct OpenAI calls
-- screenshot/image OCR (interface prepared, not implemented)
 
 ## Important Truths That Can Be Missed
 
