@@ -733,6 +733,27 @@ def _validated_ingest_suggestion(
     )
 
 
+def _load_merchant_aliases(db: Session, household_id: int) -> list[tuple[str, str]]:
+    """Load merchant aliases for a household. Returns [(lowercase_alias, canonical_name)].
+    Gracefully returns empty list if table doesn't exist yet."""
+    try:
+        aliases = db.query(models.MerchantAlias).filter_by(household_id=household_id).all()
+        return [(a.alias.lower(), a.canonical_name) for a in aliases]
+    except Exception:
+        return []
+
+
+def _apply_merchant_normalization(text: str, aliases: list[tuple[str, str]]) -> str:
+    """Replace known merchant aliases in text with their canonical names."""
+    if not aliases:
+        return text
+    import re
+    for alias, canonical in aliases:
+        pattern = re.compile(re.escape(alias), re.IGNORECASE)
+        text = pattern.sub(canonical, text)
+    return text
+
+
 def analyze_ingest_input(
     db: Session,
     household_id: int,
@@ -754,6 +775,9 @@ def analyze_ingest_input(
         document_id=document_id,
         source_name=source_name,
     )
+
+    merchant_aliases = _load_merchant_aliases(db, household_id)
+    truncated_input = _apply_merchant_normalization(truncated_input, merchant_aliases)
 
     input_hints = detect_input_hints(truncated_input)
     is_bank_paste = normalized_source_channel == "bank_paste" or "bank_statement_keywords" in input_hints

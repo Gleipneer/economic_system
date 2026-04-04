@@ -769,6 +769,26 @@ class AssistantPromptResponse(BaseModel):
     usage: Optional[AIUsageRead] = None
 
 
+# -------- MerchantAlias --------
+class MerchantAliasCreate(BaseModel):
+    household_id: int
+    alias: str
+    canonical_name: str
+    category_hint: Optional[str] = None
+
+
+class MerchantAliasRead(BaseModel):
+    id: int
+    household_id: int
+    alias: str
+    canonical_name: str
+    category_hint: Optional[str] = None
+    created_at: datetime
+
+    class Config:
+        orm_mode = True
+
+
 class IngestSuggestionRead(BaseModel):
     target_entity_type: Literal["recurring_cost", "subscription_contract", "loan", "income_source"]
     review_bucket: Literal["recurring_cost", "subscription_contract", "loan", "income_source", "transfer_or_saving", "unclear"] = "unclear"
