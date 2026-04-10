@@ -1,11 +1,9 @@
-# Legacy Pointer: runbook.md
+# Gammalt dokument (Legacy Pointer)
 
-This filename is retained for compatibility.
+Detta dokument är inte längre "source of truth".
+Det bevaras enbart för bakåtkompatibla referenser och arkivändamål.
 
-Use these canonical files instead:
+**LÄS ISTÄLLET DEN NYA KANONISKA DOKUMENTATIONEN:**
+👉 Starta med: `docs/HANDOFF_FOR_OTHER_MODELS.md`
 
-1. `docs/HANDOFF_MASTER.md`
-2. `docs/RUNTIME_AND_OPERATIONS.md`
-3. `docs/CURRENT_STATE.md`
-
-Do not treat this lower-case file as the primary operational source anymore.
+*(Vid konflikt gäller: 1. Kod, 2. Nya kanoniska docs. Detta dokument gäller INTE.)*

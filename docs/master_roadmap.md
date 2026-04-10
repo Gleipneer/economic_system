@@ -1,18 +1,9 @@
-# Legacy Pointer: master_roadmap.md
+# Gammalt dokument (Legacy Pointer)
 
-This file is retained only because older AI handoff flows pointed here.
+Detta dokument är inte längre "source of truth".
+Det bevaras enbart för bakåtkompatibla referenser och arkivändamål.
 
-The project no longer treats one giant roadmap file as the canonical planning source.
+**LÄS ISTÄLLET DEN NYA KANONISKA DOKUMENTATIONEN:**
+👉 Starta med: `docs/HANDOFF_FOR_OTHER_MODELS.md`
 
-Use these files instead:
-
-- `docs/PROJECT_CONTEXT.md`
-- `docs/LOCKED_DECISIONS.md`
-- `docs/KNOWN_GAPS_AND_RISKS.md`
-- `docs/NEXT_ACTION.md`
-
-Important correction:
-
-- `POST /demo/seed` is not part of the current runtime
-- Alembic already exists in the repo
-- the assistant is already a current feature and is OpenAI-backed when provider config exists
+*(Vid konflikt gäller: 1. Kod, 2. Nya kanoniska docs. Detta dokument gäller INTE.)*

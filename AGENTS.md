@@ -1,35 +1,72 @@
 # AGENTS.md
 
-## Cursor Cloud specific instructions
+## Instruktioner för AI-agenter
 
-### Overview
+### Översikt
 
-This is a **Household Economics Backend** — a single-service FastAPI monolith with an embedded vanilla HTML/CSS/JS frontend. It uses SQLite by default (zero config), so no external database is needed. See `README.md` for full documentation.
+**Household Economics System** — en FastAPI-monolith med inbäddad vanilla HTML/CSS/JS frontend.
+SQLite som standard, ingen extern databas. Se `docs/HANDOFF_FOR_OTHER_MODELS.md` för snabb onboarding.
 
-### Quick reference
+### Läsordning
 
-| Action | Command |
+1. `docs/HANDOFF_FOR_OTHER_MODELS.md` — Kondenserad onboarding
+2. `docs/SOURCE_OF_TRUTH.md` — Kanoniskt sanningsdokument
+3. `docs/ARCHITECTURE.md` — Teknisk arkitektur
+4. `docs/ER_DIAGRAM.md` — Datamodell (ER)
+5. `docs/DATA_MODEL.md` — Datamodell och invariants
+6. `docs/AI_CONTRACT.md` — AI-gränser och kontrakt
+7. `docs/DEPLOYMENT_UBUNTU.md` — Ubuntu-installation
+8. `docs/OPERATIONS.md` — Drift och felsökning
+9. `docs/ROADMAP_FUTURE.md` — Framtida förbättringar
+10. `AGENTS.md` — Denna fil
+
+### Snabbreferens
+
+| Action | Kommando |
 |---|---|
-| Install deps | `source venv/bin/activate && pip install -r requirements.txt` |
-| Run migrations | `source venv/bin/activate && alembic upgrade head` |
-| Run tests | `source venv/bin/activate && python -m pytest tests/ -v` |
-| Start dev server | `source venv/bin/activate && uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload` |
+| Installera deps | `source venv/bin/activate && pip install -r requirements.txt` |
+| Kör migrationer | `source venv/bin/activate && alembic upgrade head` |
+| Kör tester | `source venv/bin/activate && python -m pytest tests/ -v` |
+| Starta dev | `source venv/bin/activate && uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload` |
 | API docs | `http://localhost:8000/docs` |
 | Frontend UI | `http://localhost:8000/` |
+| Health check | `curl http://localhost:8000/healthz` |
 
-### Non-obvious caveats
+### Icke-uppenbara regler
 
-- **`python3.12-venv`** must be installed at the system level (`apt install python3.12-venv`) before `python3 -m venv` works. The update script handles creating the venv.
-- **Pydantic v1** (1.10.9) is used, not v2. Use `.dict()` not `.model_dump()`, and `class Config` not `model_config`.
-- The test file `tests/test_smoke.py` reloads app modules via `importlib.reload` to get a fresh DB per test; this means module-level state (settings cache, engine) is reset between test functions. Call `get_settings.cache_clear()` if you need to change settings between reloads.
-- The `.env` file is loaded via `python-dotenv`. Copy `.env.example` to `.env` before first run.
-- `OPENAI_API_KEY` is optional. AI assistant and ingest routes return 503 gracefully when it is unset. To test live AI flows, set it in `.env`.
-- SQLite DB lives at `./database.db` in the project root. Delete it to reset state; `alembic upgrade head` or `AUTO_CREATE_SCHEMA=true` will recreate tables.
-- The start script `scripts/start_app.sh` auto-finds a free port if 8000 is occupied.
-- **Data-In architecture**: raw input → normalize + detect hints → OCR if image → AI classify/extract → schema validate → review groups → explicit promote → Document + ExtractionDraft. No silent writes to canonical tables. See `docs/AI_DIRECTION.md`.
-- **Data-In enum constraints**: The AI field guides in `_ingest_field_guides()` include explicit allowed values for `frequency`, `variability_class`, and `controllability`. The model is instructed to convert unsupported frequencies (e.g. quarterly) to the nearest allowed value with a note. If the model returns invalid enum values, the suggestion is marked `validation_status: "invalid"` but still returned for review.
-- **Data-In token cost**: ~1600-1900 tokens for single-doc ingest, ~2400-2500 tokens for bank paste batches. Analysis assistant calls are ~650-700 tokens.
-- **OCR**: Real Tesseract OCR (swe+eng) via `TesseractOCRExtractor` in `app/ingest_content.py`. Requires system packages `tesseract-ocr` + `tesseract-ocr-swe` and Python packages `pytesseract` + `Pillow`. Scanned PDFs fall back to OCR when no text layer is found.
-- **Bank paste**: `bank_paste` source channel triggers enhanced prompt with row-grouping rules. Max output tokens increased to 1400 for batch responses. Classification type `bank_row_batch` with review buckets: `subscription_contract`, `recurring_cost`, `income_source`, `transfer_or_saving`, `unclear`.
-- **Classification types**: 9 total: `subscription_contract`, `invoice`, `recurring_cost_candidate`, `transfer_or_saving_candidate`, `bank_row_batch`, `insurance_policy`, `loan_or_credit`, `financial_note`, `unclear`.
-- **Master roadmap**: `docs/ECONOMIC_SYSTEM_MASTER_ROADMAP.md` tracks the full product plan from ingest through analysis. Phase 1 (ingest + review) is largely complete. Phase 2 (normalization) and Phase 3+ are future work.
+- **Pydantic v1** (1.10.9). Använd `.dict()` inte `.model_dump()`, och `class Config` inte `model_config`.
+- `.env` läses via `python-dotenv`. Kopiera `.env.example` till `.env` före första körning.
+- `OPENAI_API_KEY` är valfri. AI-routes returnerar `503` graciöst utan den.
+- SQLite-DB på `./database.db`. Radera → `alembic upgrade head` återskapar.
+- `scripts/start_app.sh` hittar automatiskt ledig port om 8000 är upptagen.
+- `AUTO_CREATE_SCHEMA=true` kör `create_all()` på startup, men Alembic är migrationsvägen.
+- Tester i `tests/test_smoke.py` använder `importlib.reload` — kolla `get_settings.cache_clear()` vid env-byte.
+
+### AI-invariants (FÅR INTE BRYTAS)
+
+1. **AI skriver ALDRIG tyst till kanoniska tabeller.** analyze → promote → apply, tre separata steg.
+2. **Backend äger all finansmatematik.** Inga beräkningar i frontend eller AI.
+3. **Promote skapar bara workflow-artefakter** (Document + ExtractionDraft).
+4. **Saknar API-nyckel → 503**, aldrig fejkade svar.
+5. **Determinism framför magi.** Förutsägbar, reproducerbar logik.
+
+### Datamodell (nyckelentiteter)
+
+9 klassificeringstyper: `subscription_contract`, `invoice`, `recurring_cost_candidate`, `transfer_or_saving_candidate`, `bank_row_batch`, `insurance_policy`, `loan_or_credit`, `financial_note`, `unclear`.
+
+17 tabeller. Se `docs/ER_DIAGRAM.md` för fullständigt diagram.
+
+### Token-/kostnadsmedvetenhet
+
+- Analys-assistent: ~650-1000 tokens per anrop
+- Enkel ingest: ~1600-1900 tokens
+- Bank-paste batch: ~2400-2500 tokens
+- OCR: kräver `tesseract-ocr` + `tesseract-ocr-swe` (systempaket)
+
+### Arbetsprinciper
+
+1. **Sanning först.** Dokumentationen speglar koden, aldrig tvärtom.
+2. **Minsta möjliga ändring.** Gör inte mer än det som krävs.
+3. **Verifieringsdisciplin.** Kör tester efter alla ändringar.
+4. **Dokumentationsplikt.** Uppdatera docs vid alla signifikanta ändringar.
+5. **Rensa inte aggressivt.** Dokumentera varför om du tar bort något.

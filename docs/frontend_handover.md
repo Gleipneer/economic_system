@@ -1,18 +1,9 @@
-# Legacy Pointer: frontend_handover.md
+# Gammalt dokument (Legacy Pointer)
 
-This filename is retained for compatibility with earlier handoff paths.
+Detta dokument är inte längre "source of truth".
+Det bevaras enbart för bakåtkompatibla referenser och arkivändamål.
 
-Frontend readers should now use this order:
+**LÄS ISTÄLLET DEN NYA KANONISKA DOKUMENTATIONEN:**
+👉 Starta med: `docs/HANDOFF_FOR_OTHER_MODELS.md`
 
-1. `docs/HANDOFF_MASTER.md`
-2. `docs/CURRENT_STATE.md`
-3. `docs/FRONTEND_DIRECTION.md`
-4. `docs/frontend_schema.md`
-5. `app/static/app.js`
-6. `app/main.py`
-
-Important current truth:
-
-- the active frontend has more routed modules than this file used to describe
-- recurring costs are now first-class in the active routed SPA
-- the assistant is a real current frontend feature
+*(Vid konflikt gäller: 1. Kod, 2. Nya kanoniska docs. Detta dokument gäller INTE.)*

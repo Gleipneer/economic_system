@@ -1,17 +1,21 @@
 # AI Start Here
 
-Start with [`docs/HANDOFF_MASTER.md`](docs/HANDOFF_MASTER.md).
+Start med [`docs/HANDOFF_FOR_OTHER_MODELS.md`](docs/HANDOFF_FOR_OTHER_MODELS.md).
 
-## Required Read Order
+## Läsordning
 
-1. `docs/HANDOFF_MASTER.md`
-2. `docs/CURRENT_STATE.md`
-3. `docs/LOCKED_DECISIONS.md`
-4. `docs/ARCHITECTURE.md`
-5. `docs/NEXT_ACTION.md`
+1. `docs/HANDOFF_FOR_OTHER_MODELS.md` — Kondenserad onboarding
+2. `docs/SOURCE_OF_TRUTH.md` — Kanoniskt sanningsdokument
+3. `docs/ARCHITECTURE.md` — Teknisk arkitektur med diagram
+4. `docs/ER_DIAGRAM.md` — Datamodell (ER)
+5. `docs/DATA_MODEL.md` — Datamodell och invariants
+6. `docs/AI_CONTRACT.md` — AI-gränser och kontrakt
+7. `docs/DEPLOYMENT_UBUNTU.md` — Ubuntu-installation
+8. `docs/OPERATIONS.md` — Drift och felsökning
+9. `docs/ROADMAP_FUTURE.md` — Framtida förbättringar
+10. `AGENTS.md` — Arbetsregler för AI-agenter
 
-Then continue into the more specific docs referenced there.
+## Arbetsregel
 
-## Working Rule
-
-Do not rely on older lower-case docs alone. They are retained for compatibility, but the canonical handoff lives in the uppercase docs set under `docs/`.
+Kanoniska docs är UPPERCASE-filer under `docs/`. Lowercase-filer
+behålls för kompatibilitet men är inte primärkällor.

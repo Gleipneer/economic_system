@@ -1,11 +1,9 @@
-# Legacy Pointer: architecture.md
+# Gammalt dokument (Legacy Pointer)
 
-This filename is retained for compatibility with earlier repo references.
+Detta dokument är inte längre "source of truth".
+Det bevaras enbart för bakåtkompatibla referenser och arkivändamål.
 
-Use these canonical files instead:
+**LÄS ISTÄLLET DEN NYA KANONISKA DOKUMENTATIONEN:**
+👉 Starta med: `docs/HANDOFF_FOR_OTHER_MODELS.md`
 
-1. `docs/ARCHITECTURE.md`
-2. `docs/CURRENT_STATE.md`
-3. `docs/LOCKED_DECISIONS.md`
-
-Do not treat this lower-case file as an independent source of truth.
+*(Vid konflikt gäller: 1. Kod, 2. Nya kanoniska docs. Detta dokument gäller INTE.)*

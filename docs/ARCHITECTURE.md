@@ -1,174 +1,149 @@
-# Architecture
+# Arkitektur
 
-Canonical status: actual technical architecture as implemented today.
-Last reviewed against code: 2026-04-03.
+Teknisk arkitektur som den faktiskt fungerar idag.
+Last verified against code: 2026-04-10.
 
-## System Overview
+## Systemöversikt
 
-The repository is one monolithic FastAPI application with a built-in frontend.
+```mermaid
+graph TB
+    subgraph "Klient (webbläsare)"
+        SPA["Vanilla JS SPA<br>app/static/"]
+    end
 
-Major runtime layers:
+    subgraph "FastAPI-server (app.main:app)"
+        direction TB
+        ROUTES["REST API routes<br>(app/main.py, 2400 rader)"]
+        CALC["Beräkningar<br>(app/calculations.py)"]
+        AI["AI-tjänster<br>(app/ai_services.py)"]
+        INGEST["Ingest/OCR<br>(app/ingest_content.py)"]
+        PDF["PDF-export<br>(app/pdf_export.py)"]
+        DB["Database layer<br>(app/database.py)"]
+        SETTINGS["Settings<br>(app/settings.py)"]
+    end
 
-1. settings and environment loading
-2. SQLAlchemy data model and sessions
-3. FastAPI routes
-4. deterministic calculation helpers
-5. AI service layer for OpenAI-backed analysis and ingest
-6. static SPA assets
-7. Alembic migrations
+    subgraph "Lagring"
+        SQLITE[("SQLite<br>database.db")]
+        FILES[("Filesystem<br>uploaded_files/")]
+    end
 
-## Core Application Structure
+    subgraph "Extern"
+        OPENAI["OpenAI API<br>(Responses API)"]
+    end
 
-### Backend Core
+    SPA -->|"same-origin JSON"| ROUTES
+    ROUTES --> CALC
+    ROUTES --> AI
+    ROUTES --> INGEST
+    ROUTES --> PDF
+    ROUTES --> DB
+    DB --> SQLITE
+    ROUTES --> FILES
+    AI -->|"httpx"| OPENAI
+    INGEST -->|"pytesseract"| OCR["Tesseract OCR"]
+```
 
-- `app/main.py`: primary FastAPI app, route definitions, startup, file upload logic, and AI route wiring
-- `app/models.py`: SQLAlchemy ORM model definitions
-- `app/schemas.py`: Pydantic request/response schemas
-- `app/calculations.py`: deterministic summary, housing, scenario, and helper math
-- `app/ai_services.py`: OpenAI call wrapper, compact context building, ingest validation, and draft-promotion helpers
-- `app/database.py`: engine, session factory, `Base`, optional schema bootstrap
-- `app/settings.py`: environment-backed settings
+## Komponentöversikt
 
-### Frontend Core
+### Backend
 
-- `app/static/index.html`: shell, sidebar, top bar, page mount points
-- `app/static/app.js`: SPA state, routing, rendering, form submission, API calls
-- `app/static/styles.css`: visual language and responsive layout
+| Fil | Ansvar | Storlek |
+|---|---|---|
+| `app/main.py` | FastAPI-app, alla route-definitioner, startup, filuppladdning, workflow-logik | 2420 rader |
+| `app/models.py` | SQLAlchemy ORM-modeller (17 tabeller) | 463 rader |
+| `app/schemas.py` | Pydantic v1 request/response-scheman | 35KB |
+| `app/calculations.py` | Deterministisk sammanfattning, boende, scenario, hjälpmatematik | 15KB |
+| `app/ai_services.py` | OpenAI-anrop, kontextbygge, ingest-validering, draft-promotion | 46KB |
+| `app/ingest_content.py` | Textextraktion, OCR, PDF-parsning, normalisering | 10KB |
+| `app/pdf_export.py` | Bank-PDF-generering via reportlab | 14KB |
+| `app/database.py` | SQLAlchemy engine, session-factory, auto-bootstrap | 1.2KB |
+| `app/settings.py` | Pydantic BaseSettings med env-variabler | 2.1KB |
 
-### Operations and Schema
+### Frontend
 
-- `alembic/`: migration environment and baseline schema revision
-- `Dockerfile`: container runtime path
-- `docker-compose.yml`: local container orchestration
-- `scripts/start_app.sh`: preferred local start path with migration step and port fallback
-- `tests/test_smoke.py`: backend smoke coverage
+| Fil | Ansvar | Storlek |
+|---|---|---|
+| `app/static/index.html` | SPA-skal med sidebar och topbar | 1.4KB |
+| `app/static/app.js` | All SPA-logik: routing, rendering, formulär, API-anrop | 233KB |
+| `app/static/styles.css` | Visuellt språk, layout, responsivitet | 17KB |
 
-## Data Model Shape
+### Drift
 
-The current data model groups into these layers:
+| Fil | Ansvar |
+|---|---|
+| `scripts/start_app.sh` | Lokal startväg: venv, deps, alembic, port-fallback, Tailscale |
+| `Dockerfile` | Container-runtime (inkluderar Tesseract för OCR) |
+| `docker-compose.yml` | Lokal containerorkestrering |
+| `alembic/` | Migrationsmiljö + 4 revisioner |
 
-### Household Core
+## Request/Data Flow
 
-- household
-- person
+### Vanlig CRUD-begäran
+```
+Webbläsare → GET/POST/PUT/DELETE /entity → main.py route → SQLAlchemy → SQLite → JSON response
+```
 
-### Income, Liability, Cost, and Asset Records
+### Data-In AI-flöde
+```
+1. Klient skickar råtext → POST /households/{id}/ingest_ai/analyze
+2. ingest_content.py: normalisera + hint-detektering + ev. OCR
+3. ai_services.py: bygg prompt → OpenAI Responses API
+4. ai_services.py: validera varje suggestion mot Pydantic-scheman
+5. Returnera klassificering + validerade förslag (INGEN DB-skrivning)
+6. Klient granskar → POST /households/{id}/ingest_ai/promote
+7. main.py: skapa Document + ExtractionDraft-rader (workflow-artefakter)
+8. Klient väljer → POST /extraction_drafts/{id}/apply  
+9. main.py: skapa kanonisk entitet från proposed_json
+```
 
-- income source
-- loan
-- recurring cost
-- subscription contract
-- insurance policy
-- vehicle
-- asset
+### Sammanfattningsflöde
+```
+1. GET /households/{id}/summary
+2. calculations.py: ladda alla hushållsposter
+3. Normalisera till månads-/årsbelopp
+4. Beräkna totaler + risk signals
+5. Returnera deterministisk JSON
+```
 
-### Planning and Evaluation Records
+## Trust boundaries
 
-- housing scenario
-- scenario
-- scenario result
-- report snapshot
+```mermaid
+graph LR
+    subgraph "Trusted (localhost/Tailscale)"
+        CLIENT["Webbläsare"]
+        APP["FastAPI-app"]
+        DB["SQLite"]
+        FS["Filsystem"]
+    end
+    
+    subgraph "Untrusted (extern)"
+        OPENAI["OpenAI API"]
+    end
+    
+    CLIENT -->|"same-origin, ingen auth"| APP
+    APP -->|"lokal fil-I/O"| DB
+    APP -->|"lokal fil-I/O"| FS
+    APP -->|"httpx, API-nyckel, timeout"| OPENAI
+    
+    style OPENAI fill:#ff9999
+```
 
-### Document and AI-Adjacent Workflow Records
+**Säkerhetsmodell**: Ingen autentisering. Trust boundary = nätverksnivå (Tailscale VPN eller localhost).
 
-- document
-- extraction draft
-- optimization opportunity
+## Extension points
 
-## Runtime Flows
+1. **Provider-abstraktion**: `ai_services.py` kan abstraheras bakom ett interface för att stödja andra LLM-providers
+2. **Router-uppdelning**: `main.py` kan brytas ut till separata FastAPI-routers per domänområde
+3. **Bakgrundsjobb**: FastAPI/Celery eller liknande kan läggas till för påminnelser
+4. **Auth-lager**: Middleware eller dependency injection i FastAPI
+5. **Extern lagring**: `database.py` stödjer redan `DATABASE_URL` för PostgreSQL
 
-### App Startup
+## Arkitektonisk skuld
 
-1. settings are loaded from environment
-2. upload root is created if missing
-3. `database.init_db()` runs
-4. if `AUTO_CREATE_SCHEMA=true`, `create_all()` may create missing tables
-
-### Frontend Request Flow
-
-1. browser requests `/`
-2. FastAPI returns `app/static/index.html`
-3. SPA loads `app.js` and `styles.css`
-4. SPA fetches JSON from same-origin API routes
-5. unknown non-asset frontend GET paths fall back to the SPA shell
-
-### Document Flow
-
-1. frontend or client sends `POST /documents/upload`
-2. backend writes the uploaded file under `uploaded_files/{household_id}/...`
-3. backend stores a `Document` row with checksum and storage path
-4. `GET /documents/{id}/download` serves the file back from disk
-
-### Data-In AI Flow
-
-1. client sends raw text to `POST /households/{id}/ingest_ai/analyze`
-2. backend passes only relevant household scope and raw text to `app/ai_services.py`
-3. OpenAI returns structured output through the Responses API
-4. backend validates each suggestion against typed create schemas
-5. client can explicitly call `POST /households/{id}/ingest_ai/promote`
-6. backend stores one `Document` plus one or more `ExtractionDraft` rows
-7. canonical finance tables remain untouched until a later explicit `extraction_drafts/{id}/apply`
-
-### Household Summary Flow
-
-1. backend loads household-scoped records
-2. amounts are normalized to monthly and yearly forms
-3. deterministic totals are computed
-4. summary JSON is returned
-
-### Optimization Flow
-
-1. backend scans subscriptions and recurring costs
-2. heuristics create or reuse `OptimizationOpportunity` rows
-3. frontend surfaces those as improvement suggestions
-
-### Scenario Flow
-
-1. a `Scenario` stores JSON adjustments
-2. scenario execution loads current household records
-3. adjustments are applied in memory
-4. baseline and projected summaries are computed
-5. a `ScenarioResult` row is stored
-
-### Report Flow
-
-1. backend computes current household summary
-2. summary is stored as `result_json` in `ReportSnapshot`
-3. frontend can list, open, and delete saved snapshots
-
-### Assistant Flow
-
-1. client sends a prompt to `POST /households/{id}/assistant/respond`
-2. backend builds a compact read model from household records and summary
-3. `app/ai_services.py` calls the OpenAI Responses API
-4. response is returned as answer text plus provider/model/usage metadata
-
-## Current Architectural Truth
-
-The current system is best understood as a planning layer over structured household facts.
-
-It is not:
-
-- a transaction ledger
-- a bank sync engine
-- an event-sourced finance kernel
-- an AI orchestration platform
-
-## Planning Layer vs Possible Future Finance Core
-
-There is no implemented `finance_core`, transaction kernel, or bank-ingest subsystem in this repo today.
-
-If such a layer is introduced later, the clean architectural fit would be:
-
-- a lower layer for normalized transactions, balances, adapters, and reconciliation
-- the current household planning entities above or beside it as a planning/application layer
-
-That is only a possible future fit. It is not a current repo commitment.
-
-## Architectural Debt
-
-- `app/main.py` is large and owns almost all route logic
-- `app/static/app.js` contains both older and newer UI strata in one file
-- `app/ai_services.py` is directly coupled to OpenAI rather than a provider abstraction
-- the active frontend now exposes recurring costs, but the file still contains duplicated legacy and active handlers
-- `app/static/server.py` and `app/system_docs.py` exist as side artifacts, not as the primary architecture
+| Skuld | Prioritet | Kommentar |
+|---|---|---|
+| `main.py` är 2420 rader | Medel | Bör brytas ut till routers, men fungerar |
+| `app.js` är 233KB | Medel | Innehåller legacy + aktiva handlers |
+| Direkt OpenAI-koppling | Låg | Fungerar, men provider-byte kräver kodändring |
+| `AUTO_CREATE_SCHEMA=true` default | Låg | Kan maskera migrationsproblem |
+| Ingen strukturerad loggning | Låg | Uvicorn stdout räcker för hushållsbruk |
