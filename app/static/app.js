@@ -1,319 +1,79 @@
-const API = {
-  households: "/households",
-  persons: "/persons",
-  incomes: "/income_sources",
-  loans: "/loans",
-  recurringCosts: "/recurring_costs",
-  subscriptions: "/subscription_contracts",
-  insurancePolicies: "/insurance_policies",
-  vehicles: "/vehicles",
-  assets: "/assets",
-  housing: "/housing_scenarios",
-  documents: "/documents",
-  opportunities: "/optimization_opportunities",
-};
+import { API, COPY, OPTIONS, PAGES } from "./js/core/config.js";
+import { els, persistPage, persistSelection, state } from "./js/core/state.js";
+import { request as rawRequest } from "./js/api/client.js";
+import { escapeHtml, readError, showToast as baseShowToast } from "./js/utils/ui.js";
+import { createNavigationController } from "./js/shell/navigation.js";
+import { createSidebarController } from "./js/shell/sidebar.js";
+import { createAssistantRenderer } from "./js/assistant/render.js";
+import { createAssistantWorkspace } from "./js/assistant/workspace.js";
 
-const PAGES = [
-  { key: "overview", label: "Översikt" },
-  { key: "household", label: "Hushållet" },
-  { key: "incomes", label: "Inkomster" },
-  { key: "loans", label: "Lån" },
-  { key: "costs", label: "Fasta kostnader" },
-  { key: "subscriptions", label: "Abonnemang och avtal" },
-  { key: "vehicles", label: "Fordon" },
-  { key: "assets", label: "Tillgångar" },
-  { key: "housing", label: "Boendekalkyl" },
-  { key: "documents", label: "Dokument" },
-  { key: "improvements", label: "Förbättringar" },
-];
-
-const COPY = {
-  overview: {
-    title: "Översikt",
-    intro: "Se läget utan demo-data och utan överflödiga instruktioner.",
-  },
-  household: {
-    title: "Hushållet",
-    intro: "Skapa hushållet och koppla personerna som ska ingå.",
-  },
-  incomes: {
-    title: "Inkomster",
-    intro: "Lägg in nettolön eller brutto om du behöver det.",
-  },
-  loans: {
-    title: "Lån",
-    intro: "Samla skuld, ränta och månadskostnad på ett ställe.",
-  },
-  costs: {
-    title: "Fasta kostnader",
-    intro: "Registrera återkommande kostnader och försäkringar.",
-  },
-  subscriptions: {
-    title: "Abonnemang och avtal",
-    intro: "Jämför pris, bindningstid och nästa granskning.",
-  },
-  vehicles: {
-    title: "Fordon",
-    intro: "Se vad bilen kostar varje månad.",
-  },
-  assets: {
-    title: "Tillgångar",
-    intro: "Samla konton, sparande och andra tillgångar.",
-  },
-  housing: {
-    title: "Boendekalkyl",
-    intro: "Testa ett boendescenario och se kvar att leva på.",
-  },
-  documents: {
-    title: "Dokument",
-    intro: "Ladda upp avtal, fakturor, kvitton och låneavier.",
-  },
-  improvements: {
-    title: "Förbättringar",
-    intro: "Här samlas förslag som kan sänka kostnader.",
-  },
-};
-
-const OPTIONS = {
-  role: [
-    ["self", "Huvudperson"],
-    ["partner", "Partner"],
-    ["child", "Barn"],
-    ["other", "Övrigt"],
-  ],
-  incomeType: [
-    ["salary", "Lön"],
-    ["csn", "CSN"],
-    ["benefit", "Bidrag"],
-    ["pension", "Pension"],
-    ["freelance", "Frilans"],
-    ["other", "Övrigt"],
-  ],
-  frequency: [
-    ["monthly", "Varje månad"],
-    ["yearly", "Per år"],
-    ["weekly", "Varje vecka"],
-    ["biweekly", "Varannan vecka"],
-    ["daily", "Per dag"],
-  ],
-  regularity: [
-    ["fixed", "Fast"],
-    ["variable", "Varierar"],
-  ],
-  variabilityClass: [
-    ["fixed", "Fast"],
-    ["semi_fixed", "Halvfast"],
-    ["variable", "Rörlig"],
-  ],
-  recurringCostCategory: [
-    ["housing", "Boende"],
-    ["transport", "Transport"],
-    ["food", "Mat"],
-    ["health", "Hälsa"],
-    ["childcare", "Barn"],
-    ["software", "Programvara"],
-    ["debt", "Avbetalning"],
-    ["other", "Övrigt"],
-  ],
-  insuranceType: [
-    ["home", "Hem"],
-    ["car", "Bil"],
-    ["person", "Person"],
-    ["child", "Barn"],
-    ["other", "Övrigt"],
-  ],
-  loanType: [
-    ["mortgage", "Bolån"],
-    ["car", "Billån"],
-    ["csn", "CSN"],
-    ["personal_loan", "Privatlån"],
-    ["credit_card", "Kreditkort"],
-    ["other", "Övrigt"],
-  ],
-  loanStatus: [
-    ["active", "Aktivt"],
-    ["closed", "Avslutat"],
-    ["delinquent", "Försenat"],
-  ],
-  repaymentModel: [
-    ["annuity", "Annuitet"],
-    ["fixed_amortization", "Rak amortering"],
-    ["interest_only", "Endast ränta"],
-    ["manual", "Manuell"],
-  ],
-  subscriptionCategory: [
-    ["mobile", "Mobil"],
-    ["broadband", "Bredband"],
-    ["electricity", "El"],
-    ["streaming", "Streaming"],
-    ["gym", "Gym"],
-    ["alarm", "Larm"],
-    ["software", "Programvara"],
-    ["insurance", "Försäkring"],
-    ["membership", "Medlemskap"],
-    ["other", "Övrigt"],
-  ],
-  subscriptionCriticality: [
-    ["critical", "Viktigt i vardagen"],
-    ["useful", "Bra att ha"],
-    ["optional", "Kan ifrågasättas"],
-    ["dead_weight", "Troligen onödigt"],
-  ],
-  assetType: [
-    ["checking", "Lönekonto"],
-    ["savings", "Sparkonto"],
-    ["fund", "Fond eller investering"],
-    ["cash", "Kontanter"],
-    ["car", "Fordon"],
-    ["house", "Bostad"],
-    ["other", "Övrigt"],
-  ],
-  fuelType: [
-    ["petrol", "Bensin"],
-    ["diesel", "Diesel"],
-    ["electric", "El"],
-    ["hybrid", "Hybrid"],
-    ["other", "Övrigt"],
-  ],
-  documentType: [
-    ["receipt", "Kvitto"],
-    ["invoice", "Faktura"],
-    ["contract", "Avtal"],
-    ["payslip", "Lönespecifikation"],
-    ["bank_statement", "Kontoutdrag"],
-    ["loan_statement", "Låneavi"],
-  ],
-};
-
-const state = {
-  page: localStorage.getItem("he_page") || "overview",
-  selectedHouseholdId: Number(localStorage.getItem("he_household_id") || "") || null,
-  data: {
-    households: [],
-    persons: [],
-    incomes: [],
-    recurringCosts: [],
-    loans: [],
-    subscriptions: [],
-    insurancePolicies: [],
-    vehicles: [],
-    assets: [],
-    housing: [],
-    documents: [],
-    opportunities: [],
-  },
-  summary: null,
-  housingEvaluation: null,
-  editing: {
-    household: null,
-    person: null,
-    income: null,
-    loan: null,
-    cost: null,
-    insurance: null,
-    subscription: null,
-    vehicle: null,
-    asset: null,
-    housing: null,
-  },
-};
-
-const els = {};
+let navigationController;
+let sidebarController;
+let assistantRenderer;
+let assistantWorkspace;
 
 document.addEventListener("DOMContentLoaded", boot);
 
 async function boot() {
   bindElements();
+  initializeControllers();
   bindBaseEvents();
-  await refreshAllData();
+  if (localStorage.getItem("he_session_token")) {
+    try {
+      await refreshAllData();
+    } catch (error) {
+      showToast(readError(error), "error");
+    }
+  }
   render();
 }
 
-function bindElements() {
-  els.nav = document.getElementById("mainNav");
-  els.pageContent = document.getElementById("pageContent");
-  els.householdSelect = document.getElementById("householdSelect");
-  els.refreshButton = document.getElementById("refreshButton");
-  els.toast = document.getElementById("toast");
-}
-
-function bindBaseEvents() {
-  els.nav.addEventListener("click", (event) => {
-    const target = event.target.closest("[data-nav]");
-    if (!target) return;
-    state.page = target.dataset.nav;
-    persistPage();
-    render();
+function initializeControllers() {
+  assistantWorkspace = createAssistantWorkspace({
+    API,
+    state,
+    request,
+    render: () => render(),
+    showToast: (message, tone = "success") => showToast(message, tone),
+    readError,
+    selectedHousehold,
+    refreshAllData,
   });
 
-  els.refreshButton.addEventListener("click", async () => {
-    await refreshAllData();
-    render();
-    showToast("Data uppdaterades.");
+  navigationController = createNavigationController({
+    PAGES,
+    state,
+    els,
+    persistPage,
+    render: () => render(),
+    loadAssistantWorkspace: assistantWorkspace.loadAssistantWorkspace,
   });
 
-  els.householdSelect.addEventListener("change", async (event) => {
-    state.selectedHouseholdId = Number(event.target.value) || null;
-    persistSelection();
-    clearEdits();
-    state.housingEvaluation = null;
-    await ensureSummaryLoaded();
-    render();
+  sidebarController = createSidebarController({ state, els });
+
+  assistantRenderer = createAssistantRenderer({
+    state,
+    escapeHtml,
+    selectedHousehold,
+    renderPageHeader,
+    renderAssistantMarkdown,
   });
-
-  els.pageContent.addEventListener("click", handlePageClick);
-  els.pageContent.addEventListener("submit", handlePageSubmit);
-}
-
-function persistSelection() {
-  if (state.selectedHouseholdId) {
-    localStorage.setItem("he_household_id", String(state.selectedHouseholdId));
-  } else {
-    localStorage.removeItem("he_household_id");
-  }
-}
-
-function persistPage() {
-  localStorage.setItem("he_page", state.page);
 }
 
 async function request(path, options = {}) {
-  const headers = new Headers(options.headers || {});
-  if (!(options.body instanceof FormData) && !headers.has("Content-Type")) {
-    headers.set("Content-Type", "application/json");
+  try {
+    return await rawRequest(path, options);
+  } catch (error) {
+    if (error instanceof Error && error.message.includes("Sessionen har gått ut")) {
+      state.selectedHouseholdId = null;
+      render();
+    }
+    throw error;
   }
-
-  const response = await fetch(path, { ...options, headers });
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(text || `${response.status} ${response.statusText}`);
-  }
-  if (response.status === 204) return null;
-  return response.json();
 }
 
-async function refreshAllData() {
-  const entries = await Promise.all([
-    request(`${API.households}?skip=0&limit=200`).then((value) => ["households", value]),
-    request(`${API.persons}?skip=0&limit=200`).then((value) => ["persons", value]),
-    request(`${API.incomes}?skip=0&limit=200`).then((value) => ["incomes", value]),
-    request(`${API.recurringCosts}?skip=0&limit=200`).then((value) => ["recurringCosts", value]),
-    request(`${API.loans}?skip=0&limit=200`).then((value) => ["loans", value]),
-    request(`${API.subscriptions}?skip=0&limit=200`).then((value) => ["subscriptions", value]),
-    request(`${API.insurancePolicies}?skip=0&limit=200`).then((value) => ["insurancePolicies", value]),
-    request(`${API.vehicles}?skip=0&limit=200`).then((value) => ["vehicles", value]),
-    request(`${API.assets}?skip=0&limit=200`).then((value) => ["assets", value]),
-    request(`${API.housing}?skip=0&limit=200`).then((value) => ["housing", value]),
-    request(`${API.documents}?skip=0&limit=200`).then((value) => ["documents", value]),
-    request(`${API.opportunities}?skip=0&limit=200`).then((value) => ["opportunities", value]),
-  ]);
-
-  state.data = Object.fromEntries(entries);
-  if (!selectedHousehold() && households().length) {
-    state.selectedHouseholdId = households()[0].id;
-    persistSelection();
-  }
-  await ensureSummaryLoaded();
+function showToast(message, tone = "success") {
+  baseShowToast(els, message, tone);
 }
 
 async function ensureSummaryLoaded() {
@@ -347,6 +107,21 @@ function incomesForHousehold(householdId = state.selectedHouseholdId) {
 
 function recurringCostsForHousehold(householdId = state.selectedHouseholdId) {
   return state.data.recurringCosts.filter((item) => item.household_id === householdId);
+}
+
+function normalizeRecurringCostCategory(category) {
+  const normalized = String(category || "").trim().toLowerCase();
+  if (normalized === "housing") return "boende";
+  return normalized;
+}
+
+function isHousingRecurringCategory(category) {
+  return normalizeRecurringCostCategory(category) === "boende";
+}
+
+function recurringCostFormValue(item = {}) {
+  if (!item || !item.category) return item;
+  return { ...item, category: normalizeRecurringCostCategory(item.category) };
 }
 
 function loansForHousehold(householdId = state.selectedHouseholdId) {
@@ -415,14 +190,6 @@ function dateLabel(value) {
   return new Intl.DateTimeFormat("sv-SE").format(new Date(value));
 }
 
-function escapeHtml(value) {
-  return String(value ?? "")
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;");
-}
-
 function optionLabel(options, value) {
   return options.find(([optionValue]) => String(optionValue) === String(value))?.[1] || value || "Ej angivet";
 }
@@ -457,17 +224,21 @@ function onboardingSteps() {
   }
 
   const steps = [];
+  if (incomesForHousehold().length === 0 && recurringCostsForHousehold().length === 0) {
+    steps.push({ page: "assistant", title: "Importera bankunderlag", text: "Slipp mata in allt manuellt. Ladda upp filer eller klistra in utdrag i assistenten så drar vi fram allt åt dig." });
+  }
+
   if (!peopleForHousehold().length) {
     steps.push({ page: "household", title: "Lägg till personer", text: "Behövs för att koppla inkomster och fordon." });
   }
   if (!incomesForHousehold().length) {
-    steps.push({ page: "incomes", title: "Lägg in inkomster", text: "Då blir översikten meningsfull direkt." });
+    steps.push({ page: "incomes", title: "Saknas autodata?", text: "Får vi inte in lön via bankfilen kan du lägga in nettolön manuellt här." });
   }
   if (!loansForHousehold().length) {
-    steps.push({ page: "loans", title: "Lägg in lån", text: "Ger tydlig bild av skuld och månadskostnad." });
+    steps.push({ page: "loans", title: "Säkerställ lån", text: "Avbetalningar från banken hanteras delvis, men specifika räntor kan behöva matas in." });
   }
   if (!subscriptionsForHousehold().length) {
-    steps.push({ page: "subscriptions", title: "Registrera abonnemang", text: "Här finns ofta lätta besparingar att hitta." });
+    steps.push({ page: "subscriptions", title: "Granska löpande avtal", text: "Bankimporten hittar ofta många av dessa. Granska dem därefter." });
   }
   if (!housingForHousehold().length) {
     steps.push({ page: "housing", title: "Skapa boendekalkyl", text: "Bra för att se kvar att leva på och räntestress." });
@@ -559,10 +330,149 @@ function opportunityAction(kind) {
   return map[kind] || "Gå igenom förslaget och avgör om det passar hushållet.";
 }
 
-function render() {
-  renderHouseholdSelect();
-  renderNav();
-  els.pageContent.innerHTML = renderPage();
+function reportTypeLabel(type) {
+  const map = {
+    monthly_overview: "Månadsrapport",
+    optimization_report: "Förbättringsrapport",
+    bank_calc: "Bankkalkyl",
+  };
+  return map[type] || type || "Rapport";
+}
+
+function opportunityTitleLabel(item) {
+  const title = String(item?.title || "").trim();
+  if (item?.kind === "renegotiate" && title.startsWith("Review ") && title.endsWith(" pricing")) {
+    return `Granska priset för ${title.slice("Review ".length, -" pricing".length).trim()}`;
+  }
+  if (item?.kind === "cancel" && title.startsWith("Cancel optional subscription:")) {
+    return `Överväg att avsluta abonnemanget: ${title.slice("Cancel optional subscription:".length).trim()}`;
+  }
+  if (item?.kind === "reduce_usage" && title.startsWith("Reduce ")) {
+    return `Minska kostnaden för ${recurringCostLabel(title.slice("Reduce ".length).trim())}`;
+  }
+  return title || "Förbättringsförslag";
+}
+
+function opportunityRationaleLabel(item) {
+  const rationale = String(item?.rationale || "").trim();
+  if (!rationale) return opportunityAction(item?.kind);
+  if (rationale === "Ordinary price is above current price and likely worth renegotiating.") {
+    return "Ordinarie pris ligger över nuvarande pris och bör sannolikt omförhandlas.";
+  }
+  if (rationale === "Marked optional and contributes recurring monthly cost.") {
+    return "Posten är markerad som valbar och påverkar hushållets månadskostnad.";
+  }
+  if (rationale === "Cost is marked reducible/discretionary.") {
+    return "Posten är markerad som möjlig att sänka eller valbar.";
+  }
+  return rationale;
+}
+
+// Removed duplicate render function
+function renderAuthPage() {
+  return `
+    <div class="auth-container">
+      <div class="auth-shell">
+        <section class="auth-brand-panel">
+          <span class="auth-mark">HE</span>
+          <span class="page-eyebrow">Svensk hushållsekonomi</span>
+          <h2>Logga in till hushållets ekonomi</h2>
+          <p class="page-subtitle">Auth-gaten ligger kvar framför all data. Ingen hushållsdata visas utan giltig session, och inloggningen är fortsatt ett separat skyddslager före ekonomin.</p>
+          <div class="badge-row">
+            <span class="badge success">Session-skyddad</span>
+            <span class="badge muted">Read-only AI</span>
+            <span class="badge warning">Dokument review krävs</span>
+          </div>
+        </section>
+        <section class="panel auth-panel">
+          <div class="auth-section">
+            <span class="section-eyebrow">Logga in</span>
+            <h3>Fortsatt arbete i samma hushåll</h3>
+            <form id="loginForm" class="auth-form">
+              <div class="field">
+                <label>Användarnamn</label>
+                <input type="text" name="username" required />
+              </div>
+              <div class="field">
+                <label>Lösenord</label>
+                <input type="password" name="password" required />
+              </div>
+              <button type="submit" class="primary">Logga in</button>
+            </form>
+          </div>
+          <div class="auth-divider"><span>eller</span></div>
+          <div class="auth-section">
+            <span class="section-eyebrow">Skapa konto</span>
+            <h3>Ny inloggning med eget hushåll</h3>
+            <form id="registerForm" class="auth-form">
+              <div class="field">
+                <label>Nytt användarnamn</label>
+                <input type="text" name="username" required />
+              </div>
+              <div class="field">
+                <label>Lösenord</label>
+                <input type="password" name="password" required />
+              </div>
+              <div class="field">
+                <label>Hushållets namn (valfritt)</label>
+                <input type="text" name="household_name" />
+              </div>
+              <button type="submit" class="primary">Registrera</button>
+            </form>
+          </div>
+        </section>
+      </div>
+    </div>
+  `;
+}
+
+async function handleLogin(form) {
+  const data = new URLSearchParams();
+  data.append("username", form.querySelector('[name="username"]').value);
+  data.append("password", form.querySelector('[name="password"]').value);
+  try {
+    const res = await request("/auth/token", {
+      method: "POST",
+      body: data
+    });
+    localStorage.setItem("he_session_token", res.access_token);
+    await refreshAllData();
+    render();
+  } catch (error) {
+    alert("Inloggning misslyckades: " + error.message);
+  }
+}
+
+async function handleRegister(form) {
+  const payload = {
+    username: form.querySelector('[name="username"]').value,
+    password: form.querySelector('[name="password"]').value,
+    household_name: form.querySelector('[name="household_name"]').value
+  };
+  try {
+    const registered = await request("/auth/register", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    });
+
+    // Auto-login after registration
+    const loginData = new URLSearchParams();
+    loginData.append("username", payload.username);
+    loginData.append("password", payload.password);
+    const res = await request("/auth/token", {
+      method: "POST",
+      body: loginData
+    });
+    localStorage.setItem("he_session_token", res.access_token);
+    if (registered.household_id) {
+      state.selectedHouseholdId = Number(registered.household_id);
+      persistSelection();
+    }
+    await refreshAllData();
+    render();
+  } catch (error) {
+    alert("Registrering misslyckades: " + error.message);
+  }
 }
 
 function renderHouseholdSelect() {
@@ -577,27 +487,6 @@ function renderHouseholdSelect() {
   els.householdSelect.innerHTML = items
     .map((item) => `<option value="${item.id}" ${item.id === state.selectedHouseholdId ? "selected" : ""}>${escapeHtml(item.name)}</option>`)
     .join("");
-}
-
-function renderNav() {
-  els.nav.innerHTML = PAGES.map((page) => (
-    `<button type="button" class="${page.key === state.page ? "active" : ""}" data-nav="${page.key}">${page.label}</button>`
-  )).join("");
-}
-
-function renderPage() {
-  const copy = COPY[state.page];
-  return `
-    <section class="page-header">
-      <div>
-        <span class="eyebrow">${copy.title}</span>
-        <h2>${copy.title}</h2>
-        <p class="section-intro">${copy.intro}</p>
-      </div>
-      <div class="page-actions">${renderPageActions()}</div>
-    </section>
-    ${renderPageBody()}
-  `;
 }
 
 function renderPageActions() {
@@ -957,7 +846,7 @@ function renderCostsPage() {
         <h3>${currentEdit("cost")?.id ? "Redigera kostnad" : "Lägg till kostnad"}</h3>
         <p class="meta-text">Här fungerar avbetalningar också. Skriv gärna kvarvarande belopp i anteckningen om posten är en skuld som ska följas upp.</p>
         ${selectedHousehold()
-          ? renderForm("costForm", recurringCostFields(), currentEdit("cost") || {}, {
+          ? renderForm("costForm", recurringCostFields(), recurringCostFormValue(currentEdit("cost") || {}), {
               submitLabel: currentEdit("cost")?.id ? "Spara kostnad" : "Skapa kostnad",
               canDelete: Boolean(currentEdit("cost")?.id),
               deleteLabel: "Ta bort kostnad",
@@ -1307,8 +1196,8 @@ function renderOpportunityCard(item) {
     <article class="record-card">
       <div class="record-header">
         <div>
-          <h4 class="record-title">${escapeHtml(item.title)}</h4>
-          <p class="meta-text">${escapeHtml(item.rationale || opportunityAction(item.kind))}</p>
+          <h4 class="record-title">${escapeHtml(opportunityTitleLabel(item))}</h4>
+          <p class="meta-text">${escapeHtml(opportunityRationaleLabel(item))}</p>
         </div>
         <div class="record-value">${money(item.estimated_monthly_saving)}</div>
       </div>
@@ -1324,7 +1213,8 @@ function renderOpportunityCard(item) {
 
 function recurringCostLabel(value) {
   const map = Object.fromEntries(OPTIONS.recurringCostCategory);
-  return map[value] || value || "Återkommande kostnad";
+  const normalized = normalizeRecurringCostCategory(value);
+  return map[normalized] || normalized || "Återkommande kostnad";
 }
 
 function amountToMonthlyCost(item) {
@@ -1497,10 +1387,10 @@ function renderDocumentUploadForm() {
       ${renderField({ key: "issuer", label: "Avsändare eller leverantör", type: "text", placeholder: "Till exempel banken eller Tele2" }, state.ui.ingestSourceName || "")}
       ${renderField({ key: "currency", label: "Valuta", type: "text", placeholder: "SEK", default: "SEK" }, "SEK")}
       <div class="field full">
-        <label for="document_file">Ladda upp PDF, bild eller foto</label>
+        <label for="document_file">Ladda upp PDF, bild, foto, textfil, .xlsx eller .xls</label>
         <div class="upload-box upload-box-compact">
-          <input id="document_file" name="file" type="file" accept="image/*,application/pdf" capture="environment" required />
-          <p class="helper-text">Fotografera dokumentet med mobilen eller välj en PDF. Förhandsvisning visas direkt när filen valts.</p>
+          <input id="document_file" name="file" type="file" accept="image/*,application/pdf,text/plain,text/csv,text/*,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,.txt,.text,.csv,.json,.xml,.yaml,.yml,.md,.xlsx,.xls" capture="environment" required />
+          <p class="helper-text">Fotografera dokumentet med mobilen, välj en PDF eller ladda upp en textfil/CSV. Förhandsvisning visas direkt när filen valts.</p>
         </div>
       </div>
       <div class="field full">
@@ -1804,185 +1694,6 @@ function sum(values) {
   return values.reduce((total, value) => total + Number(value || 0), 0);
 }
 
-async function handlePageClick(event) {
-  const navTarget = event.target.closest("[data-nav]");
-  if (navTarget) {
-    state.page = navTarget.dataset.nav;
-    persistPage();
-    render();
-    return;
-  }
-
-  const editTarget = event.target.closest("[data-edit]");
-  if (editTarget) {
-    const moduleKey = editTarget.dataset.edit;
-    const item = findItemByModuleAndId(moduleKey, Number(editTarget.dataset.id));
-    setEdit(moduleKey, item);
-    if (moduleKey === "housing" && item) {
-      await loadHousingEvaluation(item.id);
-    }
-    render();
-    return;
-  }
-
-  const evaluateTarget = event.target.closest("[data-evaluate-housing]");
-  if (evaluateTarget) {
-    const scenarioId = Number(evaluateTarget.dataset.evaluateHousing);
-    const item = housingForHousehold().find((scenario) => scenario.id === scenarioId);
-    setEdit("housing", item);
-    await loadHousingEvaluation(scenarioId);
-    render();
-    return;
-  }
-
-  const newTarget = event.target.closest("[data-action='new-record']");
-  if (newTarget) {
-    setEdit(newTarget.dataset.module, null);
-    if (newTarget.dataset.module === "housing") {
-      state.housingEvaluation = null;
-    }
-    render();
-    return;
-  }
-
-  const scanTarget = event.target.closest("[data-action='scan-opportunities']");
-  if (scanTarget) {
-    await scanOpportunities();
-    return;
-  }
-
-  const promoteIngestTarget = event.target.closest("[data-action='promote-ingest']");
-  if (promoteIngestTarget) {
-    await promoteIngestSuggestions();
-    return;
-  }
-
-  const clearIngestTarget = event.target.closest("[data-action='clear-ingest']");
-  if (clearIngestTarget) {
-    state.ui.ingestInput = "";
-    state.ui.ingestKind = "text";
-    state.ui.ingestDocumentId = null;
-    state.ui.ingestSourceName = "";
-    state.ui.ingestResult = null;
-    render();
-    return;
-  }
-
-  const analyzeDocumentTarget = event.target.closest("[data-action='analyze-document']");
-  if (analyzeDocumentTarget) {
-    await analyzeStoredDocument(Number(analyzeDocumentTarget.dataset.documentId));
-    return;
-  }
-
-  const resetTarget = event.target.closest("[data-reset-form]");
-  if (resetTarget) {
-    resetFormState(resetTarget.dataset.resetForm);
-    render();
-    return;
-  }
-
-  const deleteTarget = event.target.closest("[data-delete-form]");
-  if (deleteTarget) {
-    await deleteFromForm(deleteTarget.dataset.deleteForm);
-  }
-}
-
-async function handlePageSubmit(event) {
-  event.preventDefault();
-  const form = event.target;
-
-  try {
-    switch (form.id) {
-      case "householdForm":
-        await saveHousehold(form);
-        break;
-      case "personForm":
-        await savePerson(form);
-        break;
-      case "incomeForm":
-        await saveIncome(form);
-        break;
-      case "loanForm":
-        await saveLoan(form);
-        break;
-      case "costForm":
-        await saveRecurringCost(form);
-        break;
-      case "insuranceForm":
-        await saveInsurance(form);
-        break;
-      case "subscriptionForm":
-        await saveSubscription(form);
-        break;
-      case "vehicleForm":
-        await saveVehicle(form);
-        break;
-      case "assetForm":
-        await saveAsset(form);
-        break;
-      case "housingForm":
-        await saveHousing(form);
-        break;
-      case "documentUploadForm":
-        await uploadDocument(form);
-        break;
-      default:
-        return;
-    }
-  } catch (error) {
-    showToast(readError(error), "error");
-  }
-}
-
-function resetFormState(formId) {
-  const map = {
-    householdForm: "household",
-    personForm: "person",
-    incomeForm: "income",
-    loanForm: "loan",
-    costForm: "cost",
-    insuranceForm: "insurance",
-    subscriptionForm: "subscription",
-    vehicleForm: "vehicle",
-    assetForm: "asset",
-    housingForm: "housing",
-  };
-  const moduleKey = map[formId];
-  if (moduleKey) setEdit(moduleKey, null);
-}
-
-async function deleteFromForm(formId) {
-  const map = {
-    householdForm: async () => {
-      if (!selectedHousehold()) return;
-      await request(`/households/${selectedHousehold().id}`, { method: "DELETE" });
-      state.selectedHouseholdId = null;
-      persistSelection();
-      clearEdits();
-      state.summary = null;
-      state.housingEvaluation = null;
-    },
-    personForm: async () => deleteRecord("person", API.persons, currentEdit("person")),
-    incomeForm: async () => deleteRecord("income", API.incomes, currentEdit("income")),
-    loanForm: async () => deleteRecord("loan", API.loans, currentEdit("loan")),
-    costForm: async () => deleteRecord("cost", API.recurringCosts, currentEdit("cost")),
-    insuranceForm: async () => deleteRecord("insurance", API.insurancePolicies, currentEdit("insurance")),
-    subscriptionForm: async () => deleteRecord("subscription", API.subscriptions, currentEdit("subscription")),
-    vehicleForm: async () => deleteRecord("vehicle", API.vehicles, currentEdit("vehicle")),
-    assetForm: async () => deleteRecord("asset", API.assets, currentEdit("asset")),
-    housingForm: async () => {
-      await deleteRecord("housing", API.housing, currentEdit("housing"));
-      state.housingEvaluation = null;
-    },
-  };
-
-  if (!map[formId]) return;
-  await map[formId]();
-  await refreshAllData();
-  render();
-  showToast("Posten togs bort.");
-}
-
 async function deleteRecord(moduleKey, endpoint, item) {
   if (!item?.id) return;
   await request(`${endpoint}/${item.id}`, { method: "DELETE" });
@@ -2188,128 +1899,17 @@ function moduleKeyForPage(pageKey) {
   return map[pageKey];
 }
 
-function findItemByModuleAndId(moduleKey, id) {
-  const collections = {
-    person: peopleForHousehold(),
-    income: incomesForHousehold(),
-    loan: loansForHousehold(),
-    cost: recurringCostsForHousehold(),
-    insurance: insuranceForHousehold(),
-    subscription: subscriptionsForHousehold(),
-    vehicle: vehiclesForHousehold(),
-    asset: assetsForHousehold(),
-    housing: housingForHousehold(),
-  };
-  return collections[moduleKey]?.find((item) => item.id === id) || null;
-}
-
-function showToast(message, tone = "success") {
-  els.toast.className = `toast ${tone}`;
-  els.toast.textContent = message;
-  els.toast.hidden = false;
-  window.clearTimeout(showToast.timer);
-  showToast.timer = window.setTimeout(() => {
-    els.toast.hidden = true;
-  }, 3200);
-}
-
-function readError(error) {
-  if (error instanceof Error) {
-    try {
-      const parsed = JSON.parse(error.message);
-      if (parsed?.detail) return parsed.detail;
-    } catch (_ignored) {
-      // Fall through to the original message when the backend returned plain text.
-    }
-    return error.message;
-  }
-  return String(error);
-}
-
-Object.assign(API, {
-  drafts: "/extraction_drafts",
-  scenarios: "/scenarios",
-  scenarioResults: "/scenario_results",
-  reports: "/report_snapshots",
-  assistant: "/assistant/respond",
-  ingestAnalyze: "/ingest_ai/analyze",
-  ingestPromote: "/ingest_ai/promote",
-});
-
-PAGES.splice(
-  0,
-  PAGES.length,
-  { key: "overview", label: "Översikt", path: "/" },
-  { key: "register", label: "Registrera ekonomi", path: "/registrera" },
-  { key: "persons", label: "Personer", path: "/personer" },
-  { key: "incomes", label: "Inkomster", path: "/inkomster" },
-  { key: "loans", label: "Lån", path: "/lan" },
-  { key: "costs", label: "Återkommande kostnader", path: "/kostnader" },
-  { key: "subscriptions", label: "Abonnemang och avtal", path: "/abonnemang" },
-  { key: "insurance", label: "Försäkringar", path: "/forsakringar" },
-  { key: "vehicles", label: "Fordon", path: "/fordon" },
-  { key: "assets", label: "Tillgångar", path: "/tillgangar" },
-  { key: "housing", label: "Boendekalkyl", path: "/boendekalkyl" },
-  { key: "documents", label: "Dokument", path: "/dokument" },
-  { key: "improvements", label: "Förbättringsförslag", path: "/forbattringsforslag" },
-  { key: "scenarios", label: "Scenarier", path: "/scenarier" },
-  { key: "reports", label: "Sparade rapporter", path: "/rapporter" },
-  { key: "assistant", label: "Ekonomiassistent", path: "/ekonomiassistent" },
-  { key: "household", label: "Hushåll", path: "/hushall" },
-);
-
-Object.assign(state.data, {
-  drafts: [],
-  scenarios: [],
-  scenarioResults: [],
-  reports: [],
-  merchantAliases: [],
-});
-
-state.ui = {
-  sidebarOpen: false,
-  openReportId: null,
-  selectedDocumentId: null,
-  selectedDocumentWorkflow: null,
-  documentDraftSelections: {},
-  documentApplyPending: false,
-  documentLinkLoanId: "",
-  documentUploadPreview: null,
-  documentApplySummary: null,
-  assistantMessages: [],
-  assistantInput: "",
-  assistantPending: false,
-  ingestInput: "",
-  ingestKind: "text",
-  ingestDocumentId: null,
-  ingestSourceName: "",
-  ingestPending: false,
-  ingestPromoting: false,
-  ingestResult: null,
-  editingDraftId: null,
-  editingDraftJson: null,
-};
-
-state.editing.scenario = null;
 
 function pageConfigByKey(key) {
-  return PAGES.find((page) => page.key === key) || PAGES[0];
+  return navigationController.pageConfigByKey(key);
 }
 
 function pageConfigByPath(pathname) {
-  return PAGES.find((page) => page.path === pathname) || pageConfigByKey("overview");
+  return navigationController.pageConfigByPath(pathname);
 }
 
 function navigateTo(pageKey, historyMode = "push") {
-  const page = pageConfigByKey(pageKey);
-  state.page = page.key;
-  persistPage();
-  if (historyMode === "push") {
-    history.pushState({}, "", page.path);
-  } else if (historyMode === "replace") {
-    history.replaceState({}, "", page.path);
-  }
-  render();
+  navigationController.navigateTo(pageKey, historyMode);
 }
 
 function bindElements() {
@@ -2346,7 +1946,7 @@ function bindBaseEvents() {
     clearEdits();
     clearDocumentUploadPreview();
     state.ui.documentApplySummary = null;
-    state.ui.assistantMessages = [];
+    assistantWorkspace.resetAssistantWorkspaceState(Boolean(state.selectedHouseholdId));
     state.ui.ingestInput = "";
     state.ui.ingestDocumentId = null;
     state.ui.ingestResult = null;
@@ -2354,6 +1954,7 @@ function bindBaseEvents() {
     state.ui.selectedDocumentWorkflow = null;
     state.ui.documentApplySummary = null;
     await ensureSummaryLoaded();
+    await assistantWorkspace.loadAssistantWorkspace();
     render();
   });
 
@@ -2371,13 +1972,14 @@ function bindBaseEvents() {
     state.page = pageConfigByPath(location.pathname).key;
     persistPage();
     render();
+    if (state.page === "assistant" && state.selectedHouseholdId) {
+      void assistantWorkspace.loadAssistantWorkspace({ renderAfter: true });
+    }
   });
 }
 
 function toggleSidebar(open) {
-  state.ui.sidebarOpen = Boolean(open);
-  els.sidebar.classList.toggle("open", state.ui.sidebarOpen);
-  els.sidebarOverlay.hidden = !state.ui.sidebarOpen;
+  sidebarController.toggleSidebar(open);
 }
 
 async function refreshAllData() {
@@ -2423,9 +2025,29 @@ async function refreshAllData() {
     state.ui.documentApplySummary = null;
   }
   await loadSelectedDocumentWorkflow();
+  await assistantWorkspace.loadAssistantWorkspace();
+}
+
+async function loadAssistantThread({ renderAfter = false } = {}) {
+  return assistantWorkspace.loadAssistantThread({ renderAfter });
+}
+
+async function loadAssistantAnalysis({ renderAfter = false } = {}) {
+  return assistantWorkspace.loadAssistantAnalysis({ renderAfter });
+}
+
+async function loadAssistantWorkspace({ renderAfter = false } = {}) {
+  return assistantWorkspace.loadAssistantWorkspace({ renderAfter });
 }
 
 function render() {
+  if (!localStorage.getItem("he_session_token")) {
+    document.body.classList.add("auth-mode");
+    els.pageContent.innerHTML = renderAuthPage();
+    return;
+  }
+  document.body.classList.remove("auth-mode");
+
   const routePage = pageConfigByPath(location.pathname);
   if (routePage.key !== state.page) {
     state.page = routePage.key;
@@ -2435,32 +2057,18 @@ function render() {
   renderNav();
   renderTopbar();
   els.pageContent.innerHTML = renderPage();
+  if (state.page === "assistant") {
+    assistantWorkspace.updateAssistantLogBottomOffset();
+  }
   toggleSidebar(false);
 }
 
 function renderTopbar() {
-  const today = new Intl.DateTimeFormat("sv-SE", { year: "numeric", month: "long" }).format(new Date());
-  els.dateStamp.textContent = today.charAt(0).toUpperCase() + today.slice(1);
+  navigationController.renderTopbar(currentMonthLabel);
 }
 
 function renderNav() {
-  const navItems = PAGES.filter((page) => !["assistant", "household"].includes(page.key));
-  els.nav.innerHTML = navItems
-    .map(
-      (page) => `
-        <button class="nav-link ${page.key === state.page ? "active" : ""}" type="button" data-route="${page.path}">
-          <span class="nav-icon">${navGlyph(page.key)}</span>
-          <span>${page.label}</span>
-        </button>
-      `
-    )
-    .join("");
-  els.assistantNav.innerHTML = `
-    <button class="nav-link ai-link ${state.page === "assistant" ? "active" : ""}" type="button" data-route="/ekonomiassistent">
-      <span class="nav-icon">✦</span>
-      <span>Ekonomiassistent</span>
-    </button>
-  `;
+  navigationController.renderNav(selectedHousehold);
 }
 
 function navGlyph(key) {
@@ -2528,10 +2136,11 @@ function renderPage() {
 }
 
 function renderPageHeader(title, description, actions = "") {
+  const activePage = PAGES.find((page) => page.key === state.page)?.label || "Ekonomi";
   return `
     <section class="page-head">
-      <div>
-        <span class="page-eyebrow">Ekonomi</span>
+      <div class="page-head-copy">
+        <span class="page-eyebrow">${escapeHtml(activePage)}</span>
         <h2>${escapeHtml(title)}</h2>
         <p class="page-subtitle">${escapeHtml(description)}</p>
       </div>
@@ -2542,12 +2151,38 @@ function renderPageHeader(title, description, actions = "") {
 
 function renderStatCard(label, value, note = "") {
   return `
-    <article class="stats-card">
-      <label>${escapeHtml(label)}</label>
-      <strong>${escapeHtml(String(value))}</strong>
-      ${note ? `<span>${escapeHtml(note)}</span>` : ""}
+    <article class="stats-card metric-card">
+      <label class="metric-label">${escapeHtml(label)}</label>
+      <strong class="metric-value">${escapeHtml(String(value))}</strong>
+      ${note ? `<span class="metric-note">${escapeHtml(note)}</span>` : ""}
     </article>
   `;
+}
+
+function currentMonthLabel() {
+  const today = new Intl.DateTimeFormat("sv-SE", { year: "numeric", month: "long" }).format(new Date());
+  return today.charAt(0).toUpperCase() + today.slice(1);
+}
+
+function ownershipText(personId, sharedLabel = "Gemensamt") {
+  return personId ? `Personligt · ${personName(personId)}` : sharedLabel;
+}
+
+function ownershipBadge(personId, sharedLabel = "Gemensamt") {
+  return `<span class="badge ${personId ? "info" : "muted"}">${escapeHtml(ownershipText(personId, sharedLabel))}</span>`;
+}
+
+function canonicalBadge(label = "Verifierat") {
+  return `<span class="badge success">${escapeHtml(label)}</span>`;
+}
+
+function reviewDrafts(items = []) {
+  return items.filter((item) => ["pending_review", "deferred", "apply_failed"].includes(String(item.status || "")));
+}
+
+function isApproximateCost(item) {
+  const basis = `${item?.note || ""} ${item?.vendor || ""}`.toLowerCase();
+  return basis.includes("approx") || basis.includes("ungef") || basis.includes("osaker") || basis.includes("approximer");
 }
 
 function renderOverviewPageV2() {
@@ -2555,7 +2190,7 @@ function renderOverviewPageV2() {
   if (!household) {
     return `
       <section class="page-wrap">
-        ${renderPageHeader("Ekonomi", "Börja med att skapa ett hushåll för att koppla riktiga data och flöden.")}
+        ${renderPageHeader("Översikt", "Börja med att skapa ett hushåll så att overview, dokument och assistent kan bindas till riktiga dataflöden.")}
         <article class="panel">
           <div class="empty-state">
             <p>Inget hushåll är valt ännu.</p>
@@ -2573,97 +2208,123 @@ function renderOverviewPageV2() {
   const opportunities = opportunitiesForHousehold().slice().sort((a, b) => Number(b.estimated_monthly_saving || 0) - Number(a.estimated_monthly_saving || 0)).slice(0, 3);
   const subscriptions = subscriptionsForHousehold().slice().sort((a, b) => Number(b.current_monthly_cost || 0) - Number(a.current_monthly_cost || 0)).slice(0, 4);
   const drafts = draftsForHousehold();
+  const reviewQueue = reviewDrafts(drafts);
   const reports = reportsForHousehold().slice().sort((a, b) => new Date(b.generated_at).getTime() - new Date(a.generated_at).getTime()).slice(0, 2);
+  const documents = documentsForHousehold().slice(0, 3);
+  const housingItem = recurringCostsForHousehold().filter((item) => isHousingRecurringCategory(item.category)).sort((a, b) => amountToMonthlyCost(b) - amountToMonthlyCost(a))[0] || null;
+  const summaryWarnings = [
+    ...(summary.risk_signals || []).map((sig) => sig.message_sv).filter(Boolean),
+    ...warningsFromSummary(summary),
+  ].slice(0, 4);
+  const nextSteps = onboardingSteps().slice(0, 3);
   return `
-    <section class="page-wrap">
-      ${renderPageHeader("Ekonomi", household.name, `
+    <section class="page-wrap page-overview">
+      ${renderPageHeader("Översikt", `Verifierad nulägesbild för ${household.name}. Backend äger ekonomimatematiken, den här sidan fokuserar på status, ägande och nästa steg.`, `
         <button class="ghost" type="button" data-route="/abonnemang">Granska avtal</button>
-        <button class="primary" type="button" data-route="/ekonomiassistent">Fråga AI</button>
+        <button class="primary" type="button" data-route="/ekonomiassistent">Öppna assistenten</button>
       `)}
-      <section class="stats-grid">
+      <article class="panel overview-hero">
+        <div class="overview-hero-copy">
+          <span class="section-eyebrow">Månadsöversikt</span>
+          <h3>${escapeHtml(household.name)}</h3>
+          <p class="muted">Verkliga sammanfattningssiffror för ${escapeHtml(currentMonthLabel().toLowerCase())}. Osäkra poster visas separat och boende ligger kvar som en samlad hushållspost.</p>
+        </div>
+        <div class="overview-month-chip">${escapeHtml(currentMonthLabel())}</div>
+      </article>
+      <section class="stats-grid overview-kpi-grid">
         ${renderStatCard("Nettoinkomst / månad", money(summary.monthly_income), `${summary.counts?.income_sources || 0} inkomstkällor`)}
         ${renderStatCard("Totala kostnader / månad", money(summary.monthly_total_expenses), `${summary.counts?.recurring_costs || 0} kostnader, ${summary.counts?.subscription_contracts || 0} avtal`)}
         ${renderStatCard("Kvar efter kostnader", money(summary.monthly_net_cashflow), summary.monthly_net_cashflow >= 0 ? "Positivt kassaflöde" : "Negativt kassaflöde")}
         ${renderStatCard("Nettoförmögenhet", money(summary.net_worth_estimate), `${money(summary.asset_market_value)} tillgångar minus ${money(summary.loan_balance_total)} lån`)}
       </section>
-
-      ${(summary.risk_signals?.length) ? `
-      <article class="panel">
-        <span class="section-eyebrow">Risksignaler och insikter</span>
-        <div class="record-grid">
-          ${summary.risk_signals.map((sig) => `
-            <article class="record-card">
-              <div class="record-title-row">
-                <div>
-                  <span class="badge ${sig.severity === "critical" ? "danger" : sig.severity === "warning" ? "warning" : "info"}">${sig.severity === "critical" ? "Kritisk" : sig.severity === "warning" ? "Varning" : "Info"}</span>
-                  <p>${escapeHtml(sig.message_sv)}</p>
-                </div>
-              </div>
+      <section class="overview-focus-grid">
+        <article class="panel overview-housing-panel">
+          <div class="record-title-row">
+            <div>
+              <span class="section-eyebrow">Boende</span>
+              <h3>${escapeHtml(housingItem?.vendor || "Samlad hushållspost")}</h3>
+              <p class="muted">Boende presenteras fortsatt som en egen hushållspost och får inte blandas ihop med vardagskonsumtion eller interna överföringar.</p>
+            </div>
+            <div class="overview-hero-value">${money(housingItem ? amountToMonthlyCost(housingItem) : 0)}</div>
+          </div>
+          <div class="badge-row">
+            ${housingItem ? ownershipBadge(housingItem.person_id, "Gemensamt") : `<span class="badge muted">Ingen aktiv post</span>`}
+            ${housingItem && isApproximateCost(housingItem) ? `<span class="badge warning">Approximerad nivå</span>` : ""}
+            ${housingItem ? canonicalBadge("Verifierad hushållspost") : ""}
+          </div>
+          ${housingItem?.note ? `<p class="muted">${escapeHtml(housingItem.note)}</p>` : `<p class="muted">Aktiv boendekostnad visas separat så att overview och assistent kan tala sant om hushållets nuläge.</p>`}
+        </article>
+        <article class="panel overview-status-panel">
+          <span class="section-eyebrow">Osäkert och att hantera</span>
+          <h3>Separat från verifierad ekonomi</h3>
+          <div class="overview-status-stack">
+            <article class="overview-status-card">
+              <strong>${reviewQueue.length}</strong>
+              <span>reviewutkast som fortfarande kräver beslut</span>
             </article>
-          `).join("")}
-        </div>
-      </article>` : ""}
-
-      <section class="hero-grid">
+            <article class="overview-status-card">
+              <strong>${dueForReviewCount()}</strong>
+              <span>avtal med nära granskningsdatum</span>
+            </article>
+            <article class="overview-status-card">
+              <strong>${documents.length}</strong>
+              <span>dokument i hushållets arbetsyta</span>
+            </article>
+          </div>
+          ${summaryWarnings.length ? `
+            <ul class="summary-list">
+              ${summaryWarnings.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}
+            </ul>
+          ` : `<p class="muted">Inga extra risksignaler just nu. Verifierad nulägesbild är lugnare, men reviewkö och dokumentflöde är fortfarande separata arbetsytor.</p>`}
+          <div class="actions-row">
+            <button class="ghost compact" type="button" data-route="/dokument">Öppna dokument</button>
+            <button class="primary compact" type="button" data-route="/ekonomiassistent">Fråga assistenten</button>
+          </div>
+        </article>
+      </section>
+      <section class="overview-focus-grid">
         <article class="panel">
-          <span class="section-eyebrow">Vad bör ni göra nu?</span>
-          <h3>Prioriterade nästa steg</h3>
-          <div class="record-grid">
-            ${onboardingSteps().slice(0, 3).map((step, index) => `
-              <article class="record-card">
+          <span class="section-eyebrow">Nästa steg</span>
+          <h3>Arbetsyta för vardagen</h3>
+          <div class="overview-action-list">
+            ${nextSteps.map((step, index) => `
+              <article class="record-card action-card">
                 <div class="record-title-row">
                   <div>
-                    <div class="badge">${index + 1}</div>
+                    <span class="badge info">Steg ${index + 1}</span>
                     <h4 class="record-title">${escapeHtml(step.title)}</h4>
                   </div>
                   <button class="ghost compact" type="button" data-nav="${step.page}">Öppna</button>
                 </div>
                 <p class="muted">${escapeHtml(step.text)}</p>
               </article>
-            `).join("") || `<div class="empty-state"><p>Grunden finns på plats.</p></div>`}
+            `).join("") || `<div class="empty-state"><p>Grunden är på plats och hushållet är redo för löpande underhåll.</p></div>`}
           </div>
         </article>
         <article class="panel">
-          <span class="section-eyebrow">Kommande händelser</span>
-          <h3>Sådant att hålla koll på</h3>
+          <span class="section-eyebrow">Verifierade avtal</span>
+          <h3>Abonnemang att hålla koll på</h3>
           <div class="record-grid">
-            ${renderEventCard("Avtal att granska", `${dueForReviewCount()} st`, dueForReviewCount() ? "warning" : "muted")}
-            ${renderEventCard("Dokumentutkast", `${drafts.length} st`, drafts.length ? "info" : "muted")}
-            ${renderEventCard("Rapporter sparade", `${reportsForHousehold().length} st`, reportsForHousehold().length ? "success" : "muted")}
-          </div>
-        </article>
-      </section>
-
-      <section class="split-layout">
-        <article class="panel">
-          <span class="section-eyebrow">Kostnader att granska</span>
-          <h3>Abonnemang och avtal</h3>
-          <div class="record-grid">
-            ${subscriptions.map((item) => renderSubscriptionRowV2(item)).join("") || `<div class="empty-state"><p>Det finns inga abonnemang registrerade ännu.</p></div>`}
-          </div>
-        </article>
-        <article class="panel">
-          <span class="section-eyebrow">Förbättringsförslag</span>
-          <h3>Riktiga besparingsmöjligheter</h3>
-          <div class="record-grid">
-            ${opportunities.map((item) => renderOpportunityCardV2(item)).join("") || `<div class="empty-state"><p>Det finns ännu inga förbättringsförslag. Kör en skanning för att skapa riktiga förslag.</p><button class="primary" type="button" data-action="scan-opportunities">Kör ny skanning</button></div>`}
+            ${subscriptions.map((item) => renderSubscriptionRowV2(item)).join("") || `<div class="empty-state"><p>Det finns inga abonnemang registrerade än.</p></div>`}
           </div>
         </article>
       </section>
-
-      <section class="split-layout">
+      <section class="overview-focus-grid">
         <article class="panel">
-          <span class="section-eyebrow">Senaste dokument</span>
-          <h3>Dokument och draft-flöden</h3>
+          <span class="section-eyebrow">Dokumentflöde</span>
+          <h3>Senaste underlag och arbetsläge</h3>
           <div class="record-grid">
-            ${documentsForHousehold().slice(0, 3).map((item) => renderDocumentRowV2(item)).join("") || `<div class="empty-state"><p>Inga dokument uppladdade ännu.</p></div>`}
+            ${documents.map((item) => renderDocumentRowV2(item)).join("") || `<div class="empty-state"><p>Inga dokument uppladdade än.</p></div>`}
           </div>
         </article>
         <article class="panel">
           <span class="section-eyebrow">Rapporter</span>
-          <h3>Sparade sammanfattningar</h3>
+          <h3>Kanoniska snapshots</h3>
           <div class="record-grid">
-            ${reports.map((item) => renderReportRowV2(item)).join("") || `<div class="empty-state"><p>Inga sparade rapporter ännu.</p></div>`}
+            ${reports.map((item) => renderReportRowV2(item)).join("") || `<div class="empty-state"><p>Inga sparade rapporter än.</p></div>`}
+          </div>
+          <div class="record-grid" style="margin-top:16px;">
+            ${opportunities.length ? opportunities.map((item) => renderOpportunityCardV2(item)).join("") : ""}
           </div>
         </article>
       </section>
@@ -2808,7 +2469,7 @@ function renderLoansPage() {
   const items = loansForHousehold();
   return `
     <section class="page-wrap">
-      ${renderPageHeader("Lån", "Alla lån i hushållet", `<button class="primary" type="button" data-action="new-record" data-module="loan">Lägg till lån</button>`)}
+      ${renderPageHeader("Lån", "Verifierade lån och krediter i hushållet", `<button class="primary" type="button" data-action="new-record" data-module="loan">Lägg till lån</button>`)}
       <section class="stats-grid three">
         ${renderStatCard("Lån", items.length)}
         ${renderStatCard("Total skuld", money(sum(items.map((item) => item.current_balance))))}
@@ -2816,21 +2477,40 @@ function renderLoansPage() {
       </section>
       <section class="split-layout">
         <article class="panel">
+          <div class="section-head">
+            <div>
+              <span class="section-eyebrow">Lånlista</span>
+              <h3>${items.length ? `${items.length} poster i nuläget` : "Lägg till första lånet"}</h3>
+              <p class="meta-text">Kanoniska lån visas här med ägarskap, månadskostnad och skuld. Eventuella dokumentutkast granskas separat under Dokument.</p>
+            </div>
+          </div>
           <div class="record-grid">
             ${items.map((item) => `
-              <article class="record-card">
-                <div class="record-title-row">
-                  <div>
-                    <h4 class="record-title">${escapeHtml(item.lender || optionLabel(OPTIONS.loanType, item.type))}</h4>
+              <article class="record-card ledger-card">
+                <div class="ledger-row">
+                  <div class="ledger-icon">${escapeHtml(String(item.lender || optionLabel(OPTIONS.loanType, item.type)).charAt(0).toUpperCase())}</div>
+                  <div class="ledger-copy">
+                    <div class="ledger-title-row">
+                      <h4 class="record-title">${escapeHtml(item.lender || optionLabel(OPTIONS.loanType, item.type))}</h4>
+                      ${canonicalBadge()}
+                    </div>
                     <p class="muted">${escapeHtml(item.purpose || optionLabel(OPTIONS.loanType, item.type))}</p>
                   </div>
-                  <button class="ghost compact" type="button" data-edit="loan" data-id="${item.id}">Redigera</button>
+                  <div class="ledger-aside">
+                    <div class="record-value">${money(item.required_monthly_payment)}</div>
+                    <button class="ghost compact" type="button" data-edit="loan" data-id="${item.id}">Redigera</button>
+                  </div>
                 </div>
-                <div class="detail-grid">
+                <div class="badge-row">
+                  ${ownershipBadge(item.person_id)}
+                  <span class="badge">${escapeHtml(optionLabel(OPTIONS.loanStatus, item.status))}</span>
+                  <span class="badge muted">${escapeHtml(optionLabel(OPTIONS.loanType, item.type))}</span>
+                </div>
+                <div class="detail-grid four">
                   ${detailCell("Skuld", money(item.current_balance))}
                   ${detailCell("Ränta", `${number(item.nominal_rate, 2)} %`)}
                   ${detailCell("Månadskostnad", money(item.required_monthly_payment))}
-                  ${detailCell("Status", optionLabel(OPTIONS.loanStatus, item.status))}
+                  ${detailCell("Månader kvar", item.remaining_term_months || "Ej angivet")}
                 </div>
               </article>
             `).join("") || `<div class="empty-state"><p>Inga lån registrerade ännu.</p></div>`}
@@ -2852,6 +2532,10 @@ function renderLoansPage() {
 
 function renderRecurringCostsPageV2() {
   const items = recurringCostsForHousehold();
+  const housingItem = items
+    .filter((item) => isHousingRecurringCategory(item.category))
+    .sort((a, b) => amountToMonthlyCost(b) - amountToMonthlyCost(a))[0] || null;
+  const listItems = housingItem ? items.filter((item) => item.id !== housingItem.id) : items;
   const monthlyTotal = sum(items.map((item) => amountToMonthlyCost(item)));
   const mandatoryCount = items.filter((item) => item.mandatory !== false).length;
   const reducibleMonthly = sum(
@@ -2862,10 +2546,28 @@ function renderRecurringCostsPageV2() {
   return `
     <section class="page-wrap">
       ${renderPageHeader(
-        "Återkommande kostnader",
-        "Månadsposter som inte är abonnemang eller försäkringar",
+        "Kostnader",
+        "Samlad hushållskostnad, boende och andra återkommande poster utan lokal omräkning i frontend.",
         `<button class="primary" type="button" data-action="new-record" data-module="cost">Lägg till kostnad</button>`
       )}
+      ${housingItem ? `
+        <article class="panel housing-hero">
+          <div class="record-title-row">
+            <div>
+              <span class="section-eyebrow">Boende som hushållspost</span>
+              <h3>${escapeHtml(housingItem.vendor || "Boende")}</h3>
+              <p class="muted">Boende ligger kvar som en enda aktiv hushållspost. Den ska inte delas upp till privat konsumtion eller återföras som huskonto.</p>
+            </div>
+            <div class="overview-hero-value">${money(amountToMonthlyCost(housingItem))}</div>
+          </div>
+          <div class="badge-row">
+            ${ownershipBadge(housingItem.person_id)}
+            ${canonicalBadge("Aktiv post")}
+            ${isApproximateCost(housingItem) ? `<span class="badge warning">Approximerad nivå</span>` : ""}
+          </div>
+          ${housingItem.note ? `<p class="muted">${escapeHtml(housingItem.note)}</p>` : `<p class="muted">Beloppet visas separat för att ge en sanningsbunden bild av hushållets boendeåtagande.</p>`}
+        </article>
+      ` : ""}
       <section class="stats-grid">
         ${renderStatCard("Poster", items.length)}
         ${renderStatCard("Total kostnad / månad", money(monthlyTotal))}
@@ -2876,20 +2578,20 @@ function renderRecurringCostsPageV2() {
         <article class="panel">
           <div class="section-head">
             <div>
-              <span class="section-eyebrow">Kostnadslista</span>
-              <h3>${items.length ? `${items.length} återkommande poster` : "Lägg till första återkommande kostnaden"}</h3>
-              <p class="meta-text">Här ligger till exempel avbetalningar, fasta familjeposter och andra återkommande kostnader. Försäkringar har en egen modul.</p>
+              <span class="section-eyebrow">Löpande kostnader</span>
+              <h3>${listItems.length ? `${listItems.length} poster utom boende` : housingItem ? "Boende är enda aktiva posten just nu" : "Lägg till första återkommande kostnaden"}</h3>
+              <p class="meta-text">Här ligger avbetalningar, familjeposter och övriga återkommande kostnader. Försäkringar har fortsatt en egen modul.</p>
             </div>
           </div>
           <div class="record-grid">
-            ${items.map((item) => renderRecurringCostCard(item)).join("") || `<div class="empty-state"><p>Inga återkommande kostnader registrerade ännu.</p></div>`}
+            ${(listItems.length ? listItems : (!housingItem ? items : [])).map((item) => renderRecurringCostCard(item)).join("") || `<div class="empty-state"><p>Inga andra återkommande kostnader registrerade än.</p></div>`}
           </div>
         </article>
         <article class="panel form-card">
           <span class="section-eyebrow">Kostnad</span>
           <h3>${currentEdit("cost")?.id ? "Redigera återkommande kostnad" : "Lägg till återkommande kostnad"}</h3>
           <p class="muted">Backend fortsätter äga summeringen. Här registrerar ni bara posten, inte själva ekonomimatematiken.</p>
-          ${renderForm("costForm", recurringCostFields(), currentEdit("cost") || {}, {
+          ${renderForm("costForm", recurringCostFields(), recurringCostFormValue(currentEdit("cost") || {}), {
             submitLabel: currentEdit("cost")?.id ? "Spara kostnad" : "Lägg till kostnad",
             canDelete: Boolean(currentEdit("cost")?.id),
             deleteLabel: "Ta bort kostnad",
@@ -2904,7 +2606,7 @@ function renderSubscriptionsPageV2() {
   const items = subscriptionsForHousehold();
   return `
     <section class="page-wrap">
-      ${renderPageHeader("Abonnemang och avtal", "Alla löpande abonnemang och avtal i hushållet", `<button class="primary" type="button" data-action="new-record" data-module="subscription">Lägg till abonnemang</button>`)}
+      ${renderPageHeader("Abonnemang och avtal", "Verifierade löpande avtal med tydlig ägarskap, granskningsdatum och prisnivå.", `<button class="primary" type="button" data-action="new-record" data-module="subscription">Lägg till abonnemang</button>`)}
       <section class="stats-grid">
         ${renderStatCard("Antal avtal", items.length)}
         ${renderStatCard("Total kostnad / månad", money(sum(items.map((item) => item.current_monthly_cost))))}
@@ -2913,6 +2615,13 @@ function renderSubscriptionsPageV2() {
       </section>
       <section class="split-layout">
         <article class="panel">
+          <div class="section-head">
+            <div>
+              <span class="section-eyebrow">Avtalslista</span>
+              <h3>${items.length ? `${items.length} kanoniska avtal` : "Lägg till första avtalet"}</h3>
+              <p class="meta-text">Verifierade avtal visas med ägarskap, prisnivå och granskningsstatus.</p>
+            </div>
+          </div>
           <div class="record-grid">
             ${items.map((item) => renderSubscriptionRowV2(item)).join("") || `<div class="empty-state"><p>Inga abonnemang registrerade ännu.</p></div>`}
           </div>
@@ -2933,18 +2642,23 @@ function renderSubscriptionsPageV2() {
 
 function renderSubscriptionRowV2(item) {
   return `
-    <article class="record-card">
-      <div class="record-title-row">
-        <div>
-          <h4 class="record-title">${escapeHtml(item.provider)}${item.product_name ? ` · ${escapeHtml(item.product_name)}` : ""}</h4>
+    <article class="record-card ledger-card">
+      <div class="ledger-row">
+        <div class="ledger-icon">${escapeHtml(String(item.provider || "?").charAt(0).toUpperCase())}</div>
+        <div class="ledger-copy">
+          <div class="ledger-title-row">
+            <h4 class="record-title">${escapeHtml(item.provider)}${item.product_name ? ` · ${escapeHtml(item.product_name)}` : ""}</h4>
+            ${canonicalBadge()}
+          </div>
           <p class="muted">${escapeHtml(optionLabel(OPTIONS.subscriptionCategory, item.category))}${item.next_review_at ? ` · nästa granskning ${dateLabel(item.next_review_at)}` : ""}</p>
         </div>
-        <div class="actions-row">
+        <div class="ledger-aside">
           <span class="record-value">${money(item.current_monthly_cost)}</span>
           <button class="ghost compact" type="button" data-edit="subscription" data-id="${item.id}">Redigera</button>
         </div>
       </div>
       <div class="badge-row">
+        ${ownershipBadge(item.person_id)}
         <span class="badge">${escapeHtml(optionLabel(OPTIONS.subscriptionCriticality, item.household_criticality))}</span>
         ${item.ordinary_cost ? `<span class="badge warning">Ordinarie pris ${money(item.ordinary_cost)}</span>` : ""}
         ${item.binding_end_date ? `<span class="badge muted">Bindning till ${dateLabel(item.binding_end_date)}</span>` : ""}
@@ -3221,6 +2935,7 @@ function normalizeIngestResult(result) {
     }[documentSummary?.document_type || "unclear"]
     || "unclear";
   return {
+    analysisResultId: result?.analysis_result_id || null,
     inputKind: result?.source_channel || result?.input_kind || "text",
     inputDetails: result?.input_details || {},
     documentId: result?.document_id || result?.input_details?.document_id || null,
@@ -3288,23 +3003,23 @@ function renderIngestPipelineStrip() {
     <section class="record-grid four workflow-pipeline">
       <article class="workflow-step-card">
         <span class="badge info">1. Input</span>
-        <h4>Text, PDF, bild, bank-paste</h4>
-        <p class="muted">Klistra text, ladda upp PDF/bild (OCR), eller klistra bankrader från LF-format.</p>
+        <h4>Text, PDF, bild eller kontoutdrag</h4>
+        <p class="muted">Klistra in text, ladda upp underlag eller anvand OCR nar dokumentet bara finns som bild.</p>
       </article>
       <article class="workflow-step-card">
-        <span class="badge info">2. Extraktion</span>
-        <h4>Text/OCR → normalisering</h4>
-        <p class="muted">PDF-text, Tesseract OCR eller ren text normaliseras. OCR-text kan ha felläsningar.</p>
+        <span class="badge info">2. Analyze</span>
+        <h4>Extraktion och klassificering</h4>
+        <p class="muted">Text normaliseras och AI analyserar typ, fakta och osakerhet utan att skriva till kanonisk ekonomi.</p>
       </article>
       <article class="workflow-step-card">
-        <span class="badge info">3. AI-klassificering</span>
-        <h4>Typ, fakta, osäkerhet</h4>
-        <p class="muted">AI klassificerar underlag och extraherar kärnfakta. Osäkerhet markeras tydligt.</p>
+        <span class="badge info">3. Promote</span>
+        <h4>Workflow-artefakter</h4>
+        <p class="muted">Promote skapar dokument och reviewutkast. Det är fortfarande inte kanonisk data.</p>
       </article>
       <article class="workflow-step-card">
-        <span class="badge info">4. Review → Apply</span>
-        <h4>Granska → Godkänn</h4>
-        <p class="muted">Promote skapar reviewutkast. Apply skriver till kanonisk data separat och explicit.</p>
+        <span class="badge info">4. Review + Apply</span>
+        <h4>Manuell bekraftelse</h4>
+        <p class="muted">Review och apply är separata steg. Bara explicit apply skriver till kanonisk hushållsekonomi.</p>
       </article>
     </section>
   `;
@@ -3762,21 +3477,22 @@ function renderIngestResult() {
 function renderDocumentsPageV2() {
   const items = documentsForHousehold();
   const drafts = draftsForHousehold();
+  const pendingDrafts = reviewDrafts(drafts);
   return `
     <section class="page-wrap">
-      ${renderPageHeader("Dokument", "Ladda upp, fotografera, tolka och applicera ekonomiska underlag i ett sammanhållet flöde.")}
+      ${renderPageHeader("Dokument", "Arbetsyta för uppladdning, analys, review och apply. Dokumentflödet är den starkaste sanningsbarriären före kanonisk ekonomi.")}
       ${renderIngestPipelineStrip()}
       <section class="hero-grid document-hero">
         <article class="panel document-primary-panel">
           <span class="section-eyebrow">Dokumentinkorg</span>
-          <h3>En väg in för upload, foto och tolkning</h3>
-          <p class="muted">Välj en fil, ta en bild med mobilen eller klistra in råtext som fallback. Preview och tolkning hålls kvar i samma arbetsyta så att du ser vad som händer.</p>
+          <h3>En väg in för underlag, tolkning och review</h3>
+          <p class="muted">Välj fil, fotografera eller klistra in råtext. Samma arbetsyta visar preview, analys, workflowstatus och vad som faktiskt går vidare till review.</p>
           ${selectedHousehold()
             ? `
               ${renderDocumentUploadForm()}
               <div class="workflow-callout subtle">
                 <strong>Råtext som fallback</strong>
-                <p class="muted">Om du vill klistra in text från ett underlag kan du köra AI-analys här utan att lämna documents-sidan.</p>
+                <p class="muted">Klistra in text från ett underlag när du inte har filen till hands. Analyze är fortsatt read-only mot kanoniska tabeller.</p>
               </div>
               <form id="ingestAnalyzeForm" class="form-grid document-manual-analyze">
                 ${renderField({ key: "ingest_input_kind", label: "Underlagstyp", type: "select", options: ingestKindOptions(), required: true }, state.ui.ingestKind || "text")}
@@ -3800,17 +3516,17 @@ function renderDocumentsPageV2() {
         <article class="panel">
           <span class="section-eyebrow">Dokumentinkorg</span>
           <h3>${items.length ? `${items.length} dokument` : "Inga dokument ännu"}</h3>
-          <p class="muted">Här ser du vad som är uppladdat, vad som redan är tolkat och vilket dokument som just nu är aktivt i granskningen.</p>
+          <p class="muted">Här ser du vad som är uppladdat, vad som är tolkat och vilket dokument som just nu är aktivt i workbenchen.</p>
           <div class="record-grid">
             ${items.map((item) => renderDocumentRowV2(item)).join("") || `<div class="empty-state"><p>Inga dokument uppladdade ännu.</p></div>`}
           </div>
         </article>
         <article class="panel">
           <span class="section-eyebrow">Granska och applicera</span>
-          <h3>${drafts.length ? `${drafts.length} utkast att granska` : "Inga utkast att granska"}</h3>
-          <p class="muted">Godkänn, koppla, skjut upp eller avvisa här. Varje apply visar en tydlig bekräftelse på vad som skrevs till kanonisk data.</p>
+          <h3>${pendingDrafts.length ? `${pendingDrafts.length} utkast kräver review` : "Inga utkast kräver review"}</h3>
+          <p class="muted">Bara utkast som fortfarande väntar på beslut visas här. Varje apply visar efteråt exakt vad som skrevs till kanonisk data.</p>
           <div class="record-grid">
-            ${drafts.map((draft) => renderDocumentDraftReviewCard(draft)).join("") || `<div class="empty-state"><p>Det finns inga väntande reviewutkast.</p></div>`}
+            ${pendingDrafts.map((draft) => renderDocumentDraftReviewCard(draft)).join("") || `<div class="empty-state"><p>Det finns inga väntande reviewutkast.</p></div>`}
           </div>
         </article>
       </section>
@@ -4170,6 +3886,8 @@ function renderDocumentDraftReviewCard(draft) {
   const proposed = draft.proposed_json || {};
   const reviewPayload = draft.review_json || proposed;
   const loanSelectName = `document_link_loan_${draft.id}`;
+  const workflowResolution = (state.ui.selectedDocumentWorkflow?.entity_resolutions || [])
+    .find((resolution) => resolution.draft_id === draft.id);
   const currentTarget = draft.status === "approved" && draft.canonical_target_entity_id
     ? `${escapeHtml(draft.canonical_target_entity_type)} #${escapeHtml(draft.canonical_target_entity_id)}`
     : null;
@@ -4185,7 +3903,10 @@ function renderDocumentDraftReviewCard(draft) {
       ${draft.target_entity_type === "loan" ? renderLoanReviewFields(reviewPayload) : ""}
       ${currentTarget ? `<p class="muted">Kanonisk koppling: ${currentTarget}</p>` : ""}
       ${draft.review_error ? `<p class="muted" style="color:var(--danger)">Misslyckades: ${escapeHtml(draft.review_error)}</p>` : ""}
-      ${draft.status === "pending_review" ? `
+      ${draft.status === "pending_review" && workflowResolution ? `
+        <p class="muted">Det här utkastet har föreslagen objektkedja. Använd dokumentets apply-flöde ovan för att undvika dubbelregistrering.</p>
+      ` : ""}
+      ${draft.status === "pending_review" && !workflowResolution ? `
         <div class="actions-row">
           <button class="primary compact" type="button" data-action="apply-draft-create" data-draft-id="${draft.id}">Godkänn och skapa nytt ${escapeHtml(draftTargetLabel(draft.target_entity_type).toLowerCase())}</button>
           ${draft.target_entity_type === "loan" ? `
@@ -4264,10 +3985,10 @@ function renderDocumentWorkflowPanel() {
         <strong>Vad händer vid apply</strong>
         <p class="muted">Du godkänner först ett förslag, därefter skrivs det till kanonisk data. Om något behöver justeras kan du redigera, skjuta upp eller avvisa innan du applicerar.</p>
       </article>
-      <div class="actions-row">
+      ${drafts.length ? `<div class="actions-row">
         <button class="ghost compact" type="button" data-action="prefill-loan-from-document" data-document-id="${document.id}">Förifyll lån</button>
         <button class="ghost compact" type="button" data-action="prefill-vehicle-from-document" data-document-id="${document.id}">Förifyll fordon</button>
-      </div>
+      </div>` : ""}
       ${drafts.length ? `<p class="muted">Det finns ${drafts.length} utkast kopplade till dokumentet nedan.</p>` : ""}
     </section>
   `;
@@ -4290,8 +4011,8 @@ function renderOpportunityCardV2(item) {
     <article class="record-card">
       <div class="record-title-row">
         <div>
-          <h4 class="record-title">${escapeHtml(item.title)}</h4>
-          <p class="muted">${escapeHtml(item.rationale || opportunityAction(item.kind))}</p>
+          <h4 class="record-title">${escapeHtml(opportunityTitleLabel(item))}</h4>
+          <p class="muted">${escapeHtml(opportunityRationaleLabel(item))}</p>
         </div>
         <div class="record-value">${money(item.estimated_monthly_saving)}</div>
       </div>
@@ -4365,25 +4086,19 @@ function renderReportsPageV2() {
   const openReport = items.find((item) => item.id === state.ui.openReportId) || items[0] || null;
   return `
     <section class="page-wrap">
-      ${renderPageHeader("Sparade rapporter", "Genererade rapporter och sammanfattningar")}
-      <article class="panel form-card">
-        <span class="section-eyebrow">Bankkalkyl (PDF)</span>
-        <h3>Exportera hushållskalkyl för banken</h3>
-        <p class="muted">Genererar en professionell PDF med hushållets ekonomi. Lämplig att visa vid bostadslånsansökan.</p>
-        <div class="form-actions">
-          <a class="primary" href="/households/${state.selectedHouseholdId}/export/bank_pdf" target="_blank" ${selectedHousehold() ? "" : "disabled"}>Ladda ned bankkalkyl (PDF)</a>
-        </div>
-        <p class="muted" style="margin-top:var(--space-s)">PDF:en bygger på hushållets registrerade data. Eventuella reviewutkast ingår inte i beräkningarna.</p>
-      </article>
+      ${renderPageHeader("Rapporter", "Kanoniska snapshots, bankkalkyl och exporter baserade på registrerad hushållsdata.", `
+        <a class="primary" href="/households/${state.selectedHouseholdId}/export/bank_pdf" target="_blank" ${selectedHousehold() ? "" : "disabled"}>Ladda ned bankkalkyl</a>
+      `)}
       <section class="split-layout">
         <article class="panel form-card">
-          <span class="section-eyebrow">Generera rapport</span>
-          <h3>Skapa ny rapportsnapshot</h3>
+          <span class="section-eyebrow">Ny snapshot</span>
+          <h3>Generera rapport med samma sanning som overview</h3>
+          <p class="muted">Bankkalkyl och snapshots bygger bara på registrerad hushållsdata. Reviewutkast räknas inte in förrän de applicerats.</p>
           ${renderReportGenerateForm()}
         </article>
         <article class="panel">
           <span class="section-eyebrow">Rapporter</span>
-          <h3>${items.length ? `${items.length} sparade rapporter` : "Inga rapporter ännu"}</h3>
+          <h3>${items.length ? `${items.length} sparade snapshots` : "Inga rapporter an"}</h3>
           <div class="record-grid">
             ${items.map((item) => renderReportRowV2(item)).join("") || `<div class="empty-state"><p>Inga rapporter sparade ännu.</p></div>`}
           </div>
@@ -4392,7 +4107,7 @@ function renderReportsPageV2() {
       ${openReport ? `
         <article class="panel">
           <span class="section-eyebrow">Rapportdetalj</span>
-          <h3 class="report-detail-title">${escapeHtml(openReport.type)} · ${dateLabel(openReport.as_of_date)}</h3>
+          <h3 class="report-detail-title">${escapeHtml(reportTypeLabel(openReport.type))} · ${dateLabel(openReport.as_of_date)}</h3>
           <pre>${escapeHtml(JSON.stringify(openReport.result_json, null, 2))}</pre>
         </article>
       ` : ""}
@@ -4401,17 +4116,24 @@ function renderReportsPageV2() {
 }
 
 function renderReportRowV2(item) {
+  const baseline = item.result_json?.baseline || item.result_json || {};
+  const income = baseline.monthly_income ?? baseline.monthly_income_net;
+  const net = baseline.monthly_net_cashflow;
   return `
-    <article class="record-card">
+    <article class="record-card report-row-card">
       <div class="record-title-row">
         <div>
-          <h4 class="record-title">${escapeHtml(item.type)}</h4>
+          <h4 class="record-title">${escapeHtml(reportTypeLabel(item.type))}</h4>
           <p class="muted">${dateLabel(item.as_of_date)} · genererad ${dateLabel(item.generated_at)}</p>
         </div>
         <div class="actions-row">
           <button class="ghost compact" type="button" data-open-report="${item.id}">Öppna</button>
           <button class="danger compact" type="button" data-delete-report="${item.id}">Ta bort</button>
         </div>
+      </div>
+      <div class="detail-grid ${income != null && net != null ? "two" : ""}">
+        ${income != null ? detailCell("Inkomst / manad", money(income)) : ""}
+        ${net != null ? detailCell("Netto / manad", money(net)) : ""}
       </div>
       <p class="report-summary">${escapeHtml(JSON.stringify(item.result_json).slice(0, 180))}...</p>
     </article>
@@ -4433,44 +4155,20 @@ function renderReportGenerateForm() {
   `;
 }
 
+function renderAssistantDeterministicOverview() {
+  return assistantRenderer.renderAssistantDeterministicOverview();
+}
+
 function renderAssistantPageV2() {
-  const messages = state.ui.assistantMessages;
-  const prompts = [
-    "Sammanfatta vår ekonomi just nu på ett enkelt sätt.",
-    "Vad borde vi fokusera på denna månad?",
-    "Vilka abonnemang bör vi granska först?",
-    "Förklara vår boendekalkyl enkelt.",
-  ];
-  return `
-    <section class="page-wrap">
-      ${renderPageHeader("Ekonomiassistent", "Read-only AI över hushållets riktiga data. Svar kan misslyckas öppet om provider saknas eller svar inte går att validera.")}
-      <article class="panel chat-shell">
-        <div class="prompt-grid">
-          ${prompts.map((prompt) => `<button class="prompt-chip" type="button" data-prompt="${escapeHtml(prompt)}">${escapeHtml(prompt)}</button>`).join("")}
-        </div>
-        <div class="chat-log">
-          ${messages.length ? messages.map(renderAssistantMessage).join("") : `<div class="chat-empty"><div><h3>Ekonomiassistent</h3><p class="muted">Svar bygger på hushållets read models. AI:n är read-only och får inte skriva till kärndata.</p></div></div>`}
-        </div>
-        <form id="assistantForm" class="chat-composer">
-          <textarea name="prompt" placeholder="Ställ en fråga om hushållets ekonomi...">${escapeHtml(state.ui.assistantInput || "")}</textarea>
-          <div class="actions-row">
-            <button class="primary" type="submit" ${selectedHousehold() ? "" : "disabled"}>${state.ui.assistantPending ? "Analyserar..." : "Skicka fråga"}</button>
-            <span class="chat-disclaimer">Assistenten läser bara kanoniska hushållsposter. Dokument och reviewutkast används inte som ekonomisk sanning förrän de har applicerats.</span>
-          </div>
-        </form>
-      </article>
-    </section>
-  `;
+  return assistantRenderer.renderAssistantPage();
 }
 
 function renderAssistantMessage(message) {
-  return `
-    <article class="chat-message ${message.role}">
-      <div class="chat-role">${message.role === "assistant" ? "Ekonomiassistent" : "Du"}</div>
-      <div class="chat-bubble">${renderAssistantMarkdown(message.content)}</div>
-      ${message.role === "assistant" && message.model ? `<div class="muted">${escapeHtml(message.provider || "openai")} · ${escapeHtml(message.model)}${message.usage?.total_tokens ? ` · ${message.usage.total_tokens} tokens` : ""}</div>` : ""}
-    </article>
-  `;
+  return assistantRenderer.renderAssistantMessage(message);
+}
+
+async function applyAssistantIntentById(messageId) {
+  return assistantWorkspace.applyAssistantIntentById(messageId);
 }
 
 function renderAssistantMarkdown(text) {
@@ -4759,10 +4457,7 @@ async function handlePageClick(event) {
     return;
   }
 
-  const promptTarget = event.target.closest("[data-prompt]");
-  if (promptTarget) {
-    state.ui.assistantInput = promptTarget.dataset.prompt;
-    render();
+  if (await assistantWorkspace.handleAssistantClick(event)) {
     return;
   }
 
@@ -4771,6 +4466,7 @@ async function handlePageClick(event) {
     state.selectedHouseholdId = Number(selectHouseholdTarget.dataset.selectHousehold);
     persistSelection();
     await ensureSummaryLoaded();
+    await loadAssistantWorkspace();
     render();
     return;
   }
@@ -5047,9 +4743,10 @@ async function handlePageClick(event) {
 }
 
 function handlePageInput(event) {
-  if (event.target.name === "prompt") {
-    state.ui.assistantInput = event.target.value;
-  } else if (event.target.name === "ingest_input_text") {
+  if (assistantWorkspace.handleAssistantInput(event)) {
+    return;
+  }
+  if (event.target.name === "ingest_input_text") {
     state.ui.ingestInput = event.target.value;
   } else if (event.target.name === "ingest_input_kind") {
     state.ui.ingestKind = event.target.value;
@@ -5126,7 +4823,13 @@ async function handlePageSubmit(event) {
         await generateReportSnapshot(form);
         break;
       case "assistantForm":
-        await askAssistant(form);
+        await assistantWorkspace.askAssistant(form);
+        break;
+      case "loginForm":
+        await handleLogin(form);
+        break;
+      case "registerForm":
+        await handleRegister(form);
         break;
       default:
         return;
@@ -5218,7 +4921,7 @@ async function analyzeStoredDocument(documentId) {
   if (!selectedHousehold()) throw new Error("Välj hushåll först.");
   const document = state.data.documents.find((item) => item.id === documentId);
   if (!document?.extracted_text) {
-    throw new Error("Dokumentet saknar extraherad text. OCR för bild/screenshot är inte implementerad ännu.");
+    throw new Error("Dokumentet saknar extraherbar text. För den här filen lyckades varken textlager eller OCR ge ett användbart underlag.");
   }
   const sourceChannel = (document.mime_type || "").toLowerCase() === "application/pdf" ? "uploaded_pdf" : "uploaded_document";
   state.ui.ingestPending = true;
@@ -5290,6 +4993,7 @@ async function promoteIngestSuggestions() {
     const response = await request(`/households/${state.selectedHouseholdId}${API.ingestPromote}`, {
       method: "POST",
       body: JSON.stringify({
+        analysis_result_id: ingestResult.analysisResultId,
         input_text: state.ui.ingestInput,
         input_kind: state.ui.ingestKind,
         source_channel: state.ui.ingestKind,
@@ -5335,29 +5039,7 @@ async function saveMerchantAlias(form) {
 }
 
 async function askAssistant(form) {
-  if (!selectedHousehold()) throw new Error("Välj hushåll först.");
-  const prompt = form.elements.prompt.value.trim();
-  if (!prompt) return;
-  state.ui.assistantMessages.push({ role: "user", content: prompt });
-  state.ui.assistantPending = true;
-  render();
-  try {
-    const response = await request(`/households/${state.selectedHouseholdId}${API.assistant}`, {
-      method: "POST",
-      body: JSON.stringify({ prompt }),
-    });
-    state.ui.assistantMessages.push({
-      role: "assistant",
-      content: response.answer,
-      provider: response.provider,
-      model: response.model,
-      usage: response.usage,
-    });
-    state.ui.assistantInput = "";
-  } finally {
-    state.ui.assistantPending = false;
-    render();
-  }
+  return assistantWorkspace.askAssistant(form);
 }
 
 function findItemByModuleAndId(moduleKey, id) {

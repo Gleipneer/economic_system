@@ -1641,7 +1641,7 @@ textarea {
   border-radius: 22px;
   background: linear-gradient(180deg, rgba(245, 248, 253, 0.96), rgba(240, 244, 250, 0.9));
   padding: 18px;
-  padding-bottom: calc(18px + 14rem + env(safe-area-inset-bottom));
+  padding-bottom: var(--assistant-log-bottom-offset, calc(18px + 14rem + env(safe-area-inset-bottom)));
 }
 
 .central-composer {
@@ -1662,7 +1662,7 @@ textarea {
 }
 
 .central-composer textarea {
-  min-height: 96px;
+  min-height: 72px;
   max-height: 220px;
   font-size: 1rem;
   border: none;
@@ -1765,6 +1765,21 @@ textarea {
   padding: 8px 10px;
 }
 
+.intent-change-list li span,
+.intent-change-list li strong {
+  overflow-wrap: anywhere;
+}
+
+.intent-json-details {
+  margin-top: 10px;
+}
+
+.intent-json-details summary {
+  cursor: pointer;
+  font-size: 0.84rem;
+  color: var(--muted);
+}
+
 .mobile-summary-toggle {
   display: none;
 }
@@ -1775,10 +1790,18 @@ textarea {
 }
 
 .intent-data {
-  overflow: auto;
+  overflow-x: auto;
+  max-width: 100%;
   padding: 10px 12px;
   border-radius: 12px;
   background: rgba(24, 33, 50, 0.04);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.assistant-meta {
+  margin-top: 8px;
+  font-size: 0.72rem;
 }
 
 .chat-intro-banner {
@@ -1828,7 +1851,7 @@ textarea {
   .chat-log:not(.hidden) {
     border-radius: 16px;
     padding: 12px;
-    padding-bottom: calc(12px + 12.5rem + env(safe-area-inset-bottom));
+    padding-bottom: var(--assistant-log-bottom-offset, calc(12px + 12.5rem + env(safe-area-inset-bottom)));
   }
 
   .chat-message {
@@ -1860,8 +1883,15 @@ textarea {
 
   .central-composer {
     bottom: env(safe-area-inset-bottom);
-    padding: 12px;
+    padding: 10px;
     margin-top: 8px;
+  }
+
+  .central-composer textarea {
+    min-height: 52px;
+    max-height: 140px;
+    margin-bottom: 8px;
+    font-size: 0.95rem;
   }
 
   .assistant-composer-actions {
@@ -1880,6 +1910,11 @@ textarea {
     font-size: 0.86rem;
   }
 
+  .assistant-file-label,
+  .assistant-composer-actions .primary {
+    padding: 8px 10px;
+  }
+
   .chat-role {
     font-size: 0.72rem;
   }
@@ -1887,5 +1922,25 @@ textarea {
   .chat-bubble-card {
     font-size: 0.95rem;
     line-height: 1.5;
+    max-width: 100%;
+    overflow-wrap: anywhere;
+  }
+
+  .chat-intent-card,
+  .chat-result-card {
+    overflow: hidden;
+  }
+
+  .intent-card-head {
+    align-items: flex-start;
+  }
+
+  .intent-status-pill {
+    white-space: normal;
+    text-align: center;
+  }
+
+  .assistant-meta {
+    margin-bottom: 4px;
   }
 }

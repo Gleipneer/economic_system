@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 
 import { createAssistantRenderer } from "../../app/static/js/assistant/render.js";
 import { createAssistantWorkspace } from "../../app/static/js/assistant/workspace.js";
@@ -162,6 +163,8 @@ test("assistant renderer shows apply CTA for complete intent", () => {
   const pageHtml = renderer.renderAssistantPage();
   assert.match(pageHtml, /Godkänn och spara/);
   assert.match(pageHtml, /Kräver godkännande/);
+  assert.match(pageHtml, /Visa teknisk JSON/);
+  assert.match(pageHtml, /Månadsbelopp|Belopp/);
 });
 
 test("assistant workspace apply posts source_message_id", async () => {
@@ -208,7 +211,44 @@ test("assistant workspace apply posts source_message_id", async () => {
   assert.ok(applyCall);
   const payload = JSON.parse(applyCall.options.body);
   assert.equal(payload.source_message_id, 42);
-  assert.equal(payload.intent, "create_expense");
+  assert.equal(Object.prototype.hasOwnProperty.call(payload, "intent"), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(payload, "data"), false);
+});
+
+test("assistant renderer keeps technical json collapsed by default", () => {
+  const state = {
+    ui: {
+      assistantAnalysisLoading: false,
+      assistantAnalysis: null,
+      assistantMessages: [{
+        id: 77,
+        role: "assistant",
+        message_type: "assistant_response",
+        content: "Kolla diff",
+        questions: [],
+        write_intent: { intent: "update_entity", target_entity_type: "recurring_cost", data: { entity_id: 1, updates: { monthly_amount: 10000 } }, missing_fields: [] },
+        provider: "openai",
+        model: "gpt-test",
+        usage: null,
+        content_json: {},
+      }],
+      assistantInput: "",
+      assistantPending: false,
+      assistantThreadLoading: false,
+      assistantMobileSummaryOpen: false,
+      assistantDismissedIntentIds: [],
+    },
+  };
+  const renderer = createAssistantRenderer({
+    state,
+    escapeHtml: (value) => String(value),
+    selectedHousehold: () => ({ id: 1 }),
+    renderPageHeader: (title) => `<header>${title}</header>`,
+    renderAssistantMarkdown: (text) => `<p>${text}</p>`,
+  });
+  const html = renderer.renderAssistantPage();
+  assert.match(html, /<details class="intent-json-details">/);
+  assert.match(html, /Visa teknisk JSON/);
 });
 
 test("navigation controller resolves routes without split assistant ownership", () => {
@@ -226,4 +266,11 @@ test("navigation controller resolves routes without split assistant ownership", 
 
   assert.equal(controller.pageConfigByPath("/ekonomiassistent").key, "assistant");
   assert.equal(controller.pageConfigByPath("/unknown").key, "overview");
+});
+
+test("mobile composer styles reserve bottom space for chat log", () => {
+  const css = readFileSync(new URL("../../app/static/styles.css", import.meta.url), "utf8");
+  assert.match(css, /--assistant-log-bottom-offset/);
+  assert.match(css, /padding-bottom: var\(--assistant-log-bottom-offset/);
+  assert.match(css, /@media \(max-width: 768px\)/);
 });

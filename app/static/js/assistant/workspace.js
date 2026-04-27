@@ -16,6 +16,17 @@ export function createAssistantWorkspace({
     });
   }
 
+  function updateAssistantLogBottomOffset() {
+    requestAnimationFrame(() => {
+      const composer = document.querySelector(".central-composer");
+      const log = document.querySelector(".chat-log:not(.hidden)");
+      if (!composer || !log) return;
+      const safeInset = 24;
+      const targetPadding = Math.ceil(composer.offsetHeight + safeInset);
+      log.style.setProperty("--assistant-log-bottom-offset", `${targetPadding}px`);
+    });
+  }
+
   function mapAssistantThreadMessages(messages) {
     const appliedSourceIds = new Set(
       messages
@@ -56,6 +67,7 @@ export function createAssistantWorkspace({
       const thread = await request(`/households/${householdId}${API.assistantThread}`);
       if (state.selectedHouseholdId !== householdId) return;
       state.ui.assistantMessages = mapAssistantThreadMessages(thread.messages || []);
+      updateAssistantLogBottomOffset();
     } catch (error) {
       if (state.selectedHouseholdId === householdId) {
         showToast(readError(error), "error");
@@ -115,12 +127,13 @@ export function createAssistantWorkspace({
     try {
       await request(`/households/${state.selectedHouseholdId}/assistant/apply_intent`, {
         method: "POST",
-        body: JSON.stringify({ ...msg.write_intent, source_message_id: msg.id || null }),
+        body: JSON.stringify({ source_message_id: msg.id || null }),
       });
       await refreshAllData();
       await loadAssistantWorkspace();
       render();
       scheduleAssistantScrollToBottom();
+      updateAssistantLogBottomOffset();
       showToast("Systemändringen sparades.");
     } catch (error) {
       msg.intent_applied = false;
@@ -191,6 +204,7 @@ export function createAssistantWorkspace({
       form.reset();
       await loadAssistantWorkspace();
       scheduleAssistantScrollToBottom();
+      updateAssistantLogBottomOffset();
     } catch (error) {
       state.ui.assistantMessages = state.ui.assistantMessages.filter((message) => message !== pendingMessage);
       throw error;
@@ -243,6 +257,7 @@ export function createAssistantWorkspace({
   function handleAssistantInput(event) {
     if (event.target.name === "prompt") {
       state.ui.assistantInput = event.target.value;
+      updateAssistantLogBottomOffset();
       return true;
     }
     return false;
@@ -270,5 +285,6 @@ export function createAssistantWorkspace({
     mapAssistantThreadMessages,
     resetAssistantThread,
     resetAssistantWorkspaceState,
+    updateAssistantLogBottomOffset,
   };
 }

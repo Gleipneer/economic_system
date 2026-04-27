@@ -23,21 +23,38 @@ export function createAssistantRenderer({
     return String(value);
   }
 
+  function formatIntentLabel(key) {
+    return {
+      monthly_amount: "Månadsbelopp",
+      amount: "Belopp",
+      frequency: "Frekvens",
+      vendor: "Leverantör",
+      category: "Kategori",
+      status: "Status",
+      monthly_payment: "Månadsbetalning",
+      current_balance: "Aktuell skuld",
+      nominal_rate: "Nominell ränta",
+      monthly_admin_fee: "Månadsavgift",
+      lender: "Långivare",
+      provider: "Leverantör",
+      current_monthly_cost: "Månadskostnad",
+      entity_id: "Post-ID",
+    }[key] || key;
+  }
+
   function renderIntentFieldChanges(writeIntent) {
     const data = writeIntent.data || {};
     const changes = [];
     if (writeIntent.intent === "update_entity" && data.updates && typeof data.updates === "object") {
       Object.entries(data.updates).forEach(([key, nextValue]) => {
         const previous = data.previous_values && typeof data.previous_values === "object" ? data.previous_values[key] : undefined;
-        changes.push(
-          `<li><span>${escapeHtml(key)}</span><strong>${escapeHtml(formatIntentValue(previous))} → ${escapeHtml(formatIntentValue(nextValue))}</strong></li>`,
-        );
+        changes.push(`<li><span>${escapeHtml(formatIntentLabel(key))}</span><strong>${escapeHtml(formatIntentValue(previous))} → ${escapeHtml(formatIntentValue(nextValue))}</strong></li>`);
       });
     } else {
       Object.entries(data)
         .filter(([key]) => !["entity_id", "entity_type", "updates", "previous_values", "proposed_updates"].includes(key))
         .forEach(([key, value]) => {
-          changes.push(`<li><span>${escapeHtml(key)}</span><strong>${escapeHtml(formatIntentValue(value))}</strong></li>`);
+          changes.push(`<li><span>${escapeHtml(formatIntentLabel(key))}</span><strong>${escapeHtml(formatIntentValue(value))}</strong></li>`);
         });
     }
     if (!changes.length) {
@@ -193,6 +210,10 @@ export function createAssistantRenderer({
             ${canApply || isApplied ? `<button type="button" ${btnAttrs}>${btnText}</button>` : ""}
             ${!isApplied && hasPersistedMessageId ? `<button type="button" class="ghost" data-action="dismiss-assistant-intent" data-message-id="${message.id}">Avvisa</button>` : ""}
           </div>
+          <details class="intent-json-details">
+            <summary>Visa teknisk JSON</summary>
+            <pre class="intent-data">${escapeHtml(JSON.stringify(wi.data || {}, null, 2))}</pre>
+          </details>
         </div>
       `;
     }
@@ -220,7 +241,7 @@ export function createAssistantRenderer({
           <div class="chat-role">${message.role === "assistant" ? "Ekonomiassistent" : message.role === "system" ? "System" : "Du"}</div>
           <div class="chat-bubble chat-bubble-card">${renderAssistantMarkdown(message.content)}</div>
           ${extraContent}
-          ${message.role === "assistant" && message.model ? `<div class="muted">${escapeHtml(message.provider || "openai")} · ${escapeHtml(message.model)}${message.usage?.total_tokens ? ` · ${message.usage.total_tokens} tokens` : ""}</div>` : ""}
+          ${message.role === "assistant" && message.model ? `<div class="muted assistant-meta">${escapeHtml(message.provider || "openai")} · ${escapeHtml(message.model)}${message.usage?.total_tokens ? ` · ${message.usage.total_tokens} tokens` : ""}</div>` : ""}
         </div>
       </article>
     `;

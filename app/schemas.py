@@ -1047,9 +1047,9 @@ class AssistantPromptResponse(BaseModel):
 
 
 class AssistantIntentApplyRequest(BaseModel):
-    intent: str
+    intent: Optional[str] = None
     target_entity_type: Optional[str] = None
-    data: Dict[str, Any]
+    data: Optional[Dict[str, Any]] = None
     source_message_id: Optional[int] = None
 
 

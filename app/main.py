@@ -2832,27 +2832,30 @@ def household_assistant_apply_intent(
     db: Session = Depends(get_db),
 ):
     ensure_household_exists(db, household_id, request)
-    normalized_data = _normalize_assistant_apply_data(request_body)
-    _validate_apply_intent_against_source_message(db, household_id, request_body, normalized_data)
+    resolved_intent, resolved_target, resolved_data = _resolve_apply_request_from_source(
+        db,
+        household_id,
+        request_body,
+    )
 
-    if request_body.intent == "create_expense":
-        return _process_create_expense(db, household_id, normalized_data, request_body.source_message_id, request_body.intent)
-    elif request_body.intent == "create_planned_purchase":
-        return _process_create_planned_purchase(db, household_id, normalized_data, request_body.source_message_id, request_body.intent)
-    elif request_body.intent == "create_income":
-        return _process_create_income(db, household_id, normalized_data, request_body.source_message_id, request_body.intent)
-    elif request_body.intent == "create_subscription":
-        return _process_create_subscription(db, household_id, normalized_data, request_body.source_message_id, request_body.intent)
-    elif request_body.intent == "delete_entity":
-        return _process_delete_entity(db, household_id, normalized_data, request_body.source_message_id, request_body.intent)
-    elif request_body.intent == "update_entity":
-        return _process_update_entity(db, household_id, normalized_data, request_body.source_message_id, request_body.intent)
+    if resolved_intent == "create_expense":
+        return _process_create_expense(db, household_id, resolved_data, request_body.source_message_id, resolved_intent)
+    elif resolved_intent == "create_planned_purchase":
+        return _process_create_planned_purchase(db, household_id, resolved_data, request_body.source_message_id, resolved_intent)
+    elif resolved_intent == "create_income":
+        return _process_create_income(db, household_id, resolved_data, request_body.source_message_id, resolved_intent)
+    elif resolved_intent == "create_subscription":
+        return _process_create_subscription(db, household_id, resolved_data, request_body.source_message_id, resolved_intent)
+    elif resolved_intent == "delete_entity":
+        return _process_delete_entity(db, household_id, resolved_data, request_body.source_message_id, resolved_intent)
+    elif resolved_intent == "update_entity":
+        return _process_update_entity(db, household_id, resolved_data, request_body.source_message_id, resolved_intent)
     else:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Okänt intent: {request_body.intent}")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Okänt intent: {resolved_intent}")
 
 
 def _normalize_assistant_apply_data(request_body: schemas.AssistantIntentApplyRequest) -> dict[str, Any]:
-    data = dict(request_body.data)
+    data = dict(request_body.data or {})
     if request_body.intent == "update_entity":
         entity_type = request_body.target_entity_type or data.get("entity_type")
         entity_id = data.get("entity_id", data.get("id"))
@@ -2872,13 +2875,57 @@ def _normalize_assistant_apply_data(request_body: schemas.AssistantIntentApplyRe
     return data
 
 
-def _validate_apply_intent_against_source_message(
+def _resolve_apply_request_from_source(
     db: Session,
     household_id: int,
     request_body: schemas.AssistantIntentApplyRequest,
-    normalized_data: dict[str, Any],
-) -> None:
-    if request_body.source_message_id is None:
+) -> tuple[str, str | None, dict[str, Any]]:
+    source_message = _validate_source_message_for_apply(db, household_id, request_body.source_message_id)
+    stored_intent_raw = (source_message.content_json or {}).get("write_intent") or {}
+    stored_intent = str(stored_intent_raw.get("intent") or "").strip()
+    if not stored_intent:
+        raise HTTPException(status_code=409, detail="Källmeddelandet saknar giltigt write_intent.")
+    stored_target = stored_intent_raw.get("target_entity_type")
+    stored_data = _normalize_assistant_apply_data(
+        schemas.AssistantIntentApplyRequest(
+            intent=stored_intent,
+            target_entity_type=stored_target,
+            data=stored_intent_raw.get("data") or {},
+            source_message_id=request_body.source_message_id,
+        )
+    )
+    proposed_updates = stored_intent_raw.get("data", {}).get("proposed_updates")
+    if isinstance(proposed_updates, list) and len(proposed_updates) > 1:
+        raise HTTPException(status_code=409, detail="Batch-apply stöds inte för flera föreslagna uppdateringar i samma intent.")
+
+    # Optional client payload is allowed only as audit/mismatch safety check.
+    if request_body.intent or request_body.target_entity_type or request_body.data is not None:
+        requested_intent = request_body.intent or stored_intent
+        if requested_intent != stored_intent:
+            raise HTTPException(status_code=409, detail="Apply-intent matchar inte intent i källmeddelandet.")
+        requested_target = request_body.target_entity_type or stored_target or stored_data.get("entity_type")
+        if stored_target and requested_target and stored_target != requested_target:
+            raise HTTPException(status_code=409, detail="Apply-intent matchar inte målentiteten i källmeddelandet.")
+        requested_data = _normalize_assistant_apply_data(
+            schemas.AssistantIntentApplyRequest(
+                intent=stored_intent,
+                target_entity_type=requested_target,
+                data=request_body.data or {},
+                source_message_id=request_body.source_message_id,
+            )
+        )
+        if _normalize_intent_data_for_compare(stored_intent, stored_data) != _normalize_intent_data_for_compare(stored_intent, requested_data):
+            raise HTTPException(status_code=409, detail="Apply-intentens data har ändrats efter assistantsvaret.")
+
+    return stored_intent, stored_target, stored_data
+
+
+def _validate_source_message_for_apply(
+    db: Session,
+    household_id: int,
+    source_message_id: int | None,
+) -> models.ChatMessage:
+    if source_message_id is None:
         raise HTTPException(
             status_code=400,
             detail="Apply kräver source_message_id från ett sparat assistantsvar.",
@@ -2887,7 +2934,7 @@ def _validate_apply_intent_against_source_message(
         db.query(models.ChatMessage)
         .join(models.ChatThread, models.ChatMessage.thread_id == models.ChatThread.id)
         .filter(
-            models.ChatMessage.id == request_body.source_message_id,
+            models.ChatMessage.id == source_message_id,
             models.ChatMessage.role == "assistant",
             models.ChatMessage.message_type == "assistant_response",
             models.ChatThread.household_id == household_id,
@@ -2907,22 +2954,23 @@ def _validate_apply_intent_against_source_message(
             models.ChatMessage.thread_id == source_message.thread_id,
             models.ChatMessage.role == "system",
             models.ChatMessage.message_type == "system_confirmation",
-            models.ChatMessage.content_json["source_message_id"].as_integer() == request_body.source_message_id,
+            models.ChatMessage.content_json["source_message_id"].as_integer() == source_message_id,
         )
         .first()
     )
     if already_applied:
         raise HTTPException(status_code=409, detail="Write-intent har redan applicerats.")
-    if stored_intent.get("intent") != request_body.intent:
-        raise HTTPException(status_code=409, detail="Apply-intent matchar inte intent i källmeddelandet.")
-    stored_target = stored_intent.get("target_entity_type")
-    requested_target = request_body.target_entity_type or normalized_data.get("entity_type")
-    if stored_target and requested_target and stored_target != requested_target:
-        raise HTTPException(status_code=409, detail="Apply-intent matchar inte målentiteten i källmeddelandet.")
-    stored_data = _normalize_intent_data_for_compare(request_body.intent, stored_intent.get("data") or {})
-    requested_data = _normalize_intent_data_for_compare(request_body.intent, normalized_data)
-    if stored_data != requested_data:
-        raise HTTPException(status_code=409, detail="Apply-intentens data har ändrats efter assistantsvaret.")
+    return source_message
+
+
+def _validate_apply_intent_against_source_message(
+    db: Session,
+    household_id: int,
+    request_body: schemas.AssistantIntentApplyRequest,
+    normalized_data: dict[str, Any],
+) -> None:
+    # Legacy helper retained for compatibility with older tests/imports.
+    _resolve_apply_request_from_source(db, household_id, request_body)
 
 
 def _normalize_intent_data_for_compare(intent: str, data: dict[str, Any]) -> dict[str, Any]:
