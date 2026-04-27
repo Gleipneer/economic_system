@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import io
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
@@ -28,6 +28,12 @@ TEXT_EXTENSIONS = {
 
 PDF_EXTENSIONS = {".pdf"}
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tiff"}
+EXCEL_EXTENSIONS = {".xlsx"}
+EXCEL_MIME_TYPES = {
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+}
+LEGACY_EXCEL_EXTENSIONS = {".xls"}
+LEGACY_EXCEL_MIME_TYPES = {"application/vnd.ms-excel"}
 TEXT_MIME_PREFIXES = ("text/",)
 IMAGE_MIME_PREFIXES = ("image/",)
 TEXT_MIME_TYPES = {
@@ -39,12 +45,17 @@ TEXT_MIME_TYPES = {
     "application/yaml",
 }
 
+# Chunking constants for long documents
+MAX_CHUNK_CHARS = 5500
+CHUNK_OVERLAP_LINES = 2
+
 
 @dataclass(frozen=True)
 class ExtractedText:
     text: str | None
     extraction_mode: str
     notes: list[str]
+    structured_data: dict[str, Any] | None = None
 
 
 class OCRExtractor(Protocol):
@@ -253,6 +264,67 @@ def _extract_pdf_ocr(raw: bytes, reader: PdfReader, extractor: OCRExtractor) -> 
     )
 
 
+def _extract_spreadsheet_data(raw: bytes, file_name: str, mime_type: str | None = None) -> ExtractedText:
+    """Extract and normalize data from spreadsheet-like files (.xlsx, .xls, .csv)."""
+    try:
+        from .ingest_spreadsheet import load_spreadsheet, detect_transaction_table, spreadsheet_to_markdown
+    except ImportError:
+        return ExtractedText(
+            text=None,
+            extraction_mode="spreadsheet_missing_dependency",
+            notes=["Kalkylblads-stöd kräver ytterligare beroenden (openpyxl, xlrd)."],
+        )
+
+    try:
+        doc = load_spreadsheet(raw, file_name, mime_type)
+    except Exception as exc:
+        return ExtractedText(
+            text=None,
+            extraction_mode="spreadsheet_unreadable",
+            notes=[f"Filen kunde inte tolkas som kalkylblad: {exc}"],
+        )
+
+    # Try deterministic table detection across all sheets
+    tables = []
+    for sheet in doc.sheets:
+        table_result = detect_transaction_table(sheet)
+        if table_result:
+            tables.append(table_result)
+
+    # Generate Markdown for AI context (better than tab-separated)
+    markdown_text = spreadsheet_to_markdown(doc)
+
+    structured_data = None
+    if tables:
+        structured_data = {
+            "file_type": doc.file_type,
+            "sheets_count": len(doc.sheets),
+            "tables": [
+                {
+                    "sheet_name": t.sheet_name,
+                    "headers": t.headers,
+                    "rows": t.rows,
+                    "confidence": t.confidence,
+                }
+                for t in tables
+            ],
+        }
+
+    notes = [f"Extraherade data från {doc.file_type}-fil."]
+    if tables:
+        notes.append(f"Hittade {len(tables)} transaktionstabell(er) via deterministisk analys.")
+
+    for warning in doc.parse_warnings:
+        notes.append(f"Varning: {warning}")
+
+    return ExtractedText(
+        text=markdown_text,
+        extraction_mode="spreadsheet",
+        notes=notes,
+        structured_data=structured_data,
+    )
+
+
 def extract_text_from_upload(
     raw: bytes,
     *,
@@ -269,6 +341,15 @@ def extract_text_from_upload(
 
     if suffix in PDF_EXTENSIONS or mime == "application/pdf":
         return _extract_pdf_text(raw, ocr_extractor=ocr_extractor)
+
+    if suffix in LEGACY_EXCEL_EXTENSIONS or mime in LEGACY_EXCEL_MIME_TYPES:
+        return _extract_spreadsheet_data(raw, file_name=file_name or "legacy.xls", mime_type=mime)
+
+    if suffix in EXCEL_EXTENSIONS or mime in EXCEL_MIME_TYPES:
+        return _extract_spreadsheet_data(raw, file_name=file_name or "file.xlsx", mime_type=mime)
+
+    if suffix == ".csv":
+        return _extract_spreadsheet_data(raw, file_name=file_name or "data.csv", mime_type=mime)
 
     if suffix in TEXT_EXTENSIONS or mime.startswith(TEXT_MIME_PREFIXES) or mime in TEXT_MIME_TYPES:
         text = raw.decode("utf-8", errors="replace")
@@ -293,3 +374,39 @@ def extract_text_from_upload(
         extraction_mode="unsupported_binary",
         notes=["Ingen text kunde extraheras från filtypen."],
     )
+
+
+def chunk_text_for_ingest(text: str, *, max_chars: int = MAX_CHUNK_CHARS) -> list[str]:
+    """Split long text into overlapping chunks suitable for AI ingest.
+
+    Instead of silently truncating at a hard limit, this function splits
+    the text at line boundaries and returns multiple chunks. Each chunk
+    shares a few trailing/leading lines with its neighbour to preserve
+    context across boundaries.
+
+    Returns a list of chunks. For texts shorter than max_chars the list
+    contains a single element (the original text).
+    """
+    if len(text) <= max_chars:
+        return [text]
+
+    lines = text.split("\n")
+    chunks: list[str] = []
+    current_lines: list[str] = []
+    current_len = 0
+
+    for line in lines:
+        line_len = len(line) + 1  # +1 for newline
+        if current_len + line_len > max_chars and current_lines:
+            chunks.append("\n".join(current_lines))
+            # Keep last CHUNK_OVERLAP_LINES lines for context overlap
+            overlap = current_lines[-CHUNK_OVERLAP_LINES:] if len(current_lines) > CHUNK_OVERLAP_LINES else []
+            current_lines = list(overlap)
+            current_len = sum(len(l) + 1 for l in current_lines)
+        current_lines.append(line)
+        current_len += line_len
+
+    if current_lines:
+        chunks.append("\n".join(current_lines))
+
+    return chunks

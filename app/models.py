@@ -87,8 +87,91 @@ class SubscriptionCategory(str, enum.Enum):
     other = "other"
 
 
+class AppUser(Base):
+    __tablename__ = "app_users"
+    id = Column(Integer, primary_key=True, index=True)
+    username = Column(String, unique=True, index=True, nullable=False)
+    password_hash = Column(String, nullable=False)
+    household_id = Column(Integer, ForeignKey("households.id", ondelete="SET NULL"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    # Relationships
+    household = relationship("Household", back_populates="users")
+    sessions = relationship("AuthSession", back_populates="user", cascade="all, delete-orphan")
+
+
+class AuthSession(Base):
+    __tablename__ = "auth_sessions"
+    id = Column(Integer, primary_key=True, index=True)
+    session_token = Column(String, unique=True, index=True, nullable=False)
+    user_id = Column(Integer, ForeignKey("app_users.id", ondelete="CASCADE"), nullable=False)
+    expires_at = Column(DateTime, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    # Relationships
+    user = relationship("AppUser", back_populates="sessions")
+
+
+class ImportSession(Base):
+    __tablename__ = "import_sessions"
+    id = Column(Integer, primary_key=True, index=True)
+    household_id = Column(Integer, ForeignKey("households.id", ondelete="CASCADE"), nullable=False)
+    label = Column(String, nullable=False)
+    status = Column(String, default="active")  # active, completed
+    created_at = Column(DateTime, default=datetime.utcnow)
+    # Relationships
+    household = relationship("Household", back_populates="import_sessions")
+    unresolved_questions = relationship("UnresolvedQuestion", back_populates="import_session", cascade="all, delete-orphan")
+    documents = relationship("Document", back_populates="import_session")
+
+
+class UnresolvedQuestion(Base):
+    __tablename__ = "unresolved_questions"
+    id = Column(Integer, primary_key=True, index=True)
+    import_session_id = Column(Integer, ForeignKey("import_sessions.id", ondelete="CASCADE"), nullable=False)
+    kind = Column(String, nullable=False) # ownership, entity_type, categorization
+    question_text = Column(String, nullable=False)
+    related_refs = Column(JSON, nullable=True) # e.g. ["Kontoutdrag.xlsx:row=27"]
+    confidence = Column(Float, nullable=True)
+    answer = Column(Text, nullable=True)
+    status = Column(String, default="pending") # pending, answered, ignored
+    created_at = Column(DateTime, default=datetime.utcnow)
+    # Relationships
+    import_session = relationship("ImportSession", back_populates="unresolved_questions")
+
+
+class ChatThread(Base):
+    __tablename__ = "chat_threads"
+    id = Column(Integer, primary_key=True, index=True)
+    household_id = Column(Integer, ForeignKey("households.id", ondelete="CASCADE"), nullable=False)
+    label = Column(String, nullable=True)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    household = relationship("Household", back_populates="chat_threads")
+    messages = relationship(
+        "ChatMessage",
+        back_populates="thread",
+        cascade="all, delete-orphan",
+        order_by="ChatMessage.id",
+    )
+
+
+class ChatMessage(Base):
+    __tablename__ = "chat_messages"
+    id = Column(Integer, primary_key=True, index=True)
+    thread_id = Column(Integer, ForeignKey("chat_threads.id", ondelete="CASCADE"), nullable=False)
+    role = Column(String, nullable=False) # "user", "assistant", "system"
+    message_type = Column(String, nullable=False, default="message")
+    content_text = Column(Text, nullable=False)
+    content_json = Column(JSON, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    thread = relationship("ChatThread", back_populates="messages")
+
+
 class Household(Base):
     __tablename__ = "households"
+
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, nullable=False)
     currency = Column(String, default="SEK")
@@ -116,6 +199,10 @@ class Household(Base):
     report_snapshots = relationship(
         "ReportSnapshot", back_populates="household", cascade="all, delete-orphan"
     )
+    users = relationship("AppUser", back_populates="household")
+    import_sessions = relationship("ImportSession", back_populates="household", cascade="all, delete-orphan")
+    planned_purchases = relationship("PlannedPurchase", back_populates="household", cascade="all, delete-orphan")
+    chat_threads = relationship("ChatThread", back_populates="household", cascade="all, delete-orphan")
 
 
 class Person(Base):
@@ -205,8 +292,10 @@ class RecurringCost(Base):
     due_day = Column(Integer, nullable=True)
     start_date = Column(Date, nullable=True)
     end_date = Column(Date, nullable=True)
+    status = Column(String, default="active")  # active, ended, paused
     note = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     # Relationships
     household = relationship("Household", back_populates="recurring_costs")
     person = relationship("Person")
@@ -244,7 +333,9 @@ class SubscriptionContract(Base):
     next_review_at = Column(Date, nullable=True)
     latest_invoice_doc_id = Column(Integer, ForeignKey("documents.id"), nullable=True)
     note = Column(Text, nullable=True)
+    status = Column(String, default="active")  # active, ended, paused
     created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     # Relationships
     household = relationship("Household", back_populates="subscriptions")
     person = relationship("Person")
@@ -356,12 +447,36 @@ class Document(Base):
     extraction_status = Column(String, default="uploaded")  # uploaded, interpreted, pending_review, applied, failed
     processing_error = Column(Text, nullable=True)
     storage_path = Column(String, nullable=True)
+    import_session_id = Column(Integer, ForeignKey("import_sessions.id", ondelete="SET NULL"), nullable=True)
     uploaded_at = Column(DateTime, default=datetime.utcnow)
     # Relationships
     household = relationship("Household", back_populates="documents")
+    import_session = relationship("ImportSession", back_populates="documents")
+
     extraction_drafts = relationship(
         "ExtractionDraft", back_populates="document", cascade="all, delete-orphan"
     )
+
+
+class IngestAnalysisResult(Base):
+    __tablename__ = "ingest_analysis_results"
+    id = Column(Integer, primary_key=True, index=True)
+    analysis_result_id = Column(String, unique=True, index=True, nullable=False)
+    household_id = Column(Integer, ForeignKey("households.id", ondelete="CASCADE"), nullable=False)
+    document_id = Column(Integer, ForeignKey("documents.id", ondelete="SET NULL"), nullable=True)
+    source_hash = Column(String, nullable=False)
+    source_channel = Column(String, nullable=False)
+    source_name = Column(String, nullable=True)
+    normalized_suggestions = Column(JSON, nullable=False)
+    document_summary = Column(JSON, nullable=True)
+    detected_kind = Column(String, nullable=True)
+    provider = Column(String, nullable=True)
+    model = Column(String, nullable=True)
+    analysis_schema_version = Column(String, nullable=False, default="ingest-analysis-v1")
+    created_at = Column(DateTime, default=datetime.utcnow)
+    # Relationships
+    household = relationship("Household")
+    document = relationship("Document")
 
 
 class ExtractionDraft(Base):
@@ -460,3 +575,22 @@ class ReportSnapshot(Base):
     generated_at = Column(DateTime, default=datetime.utcnow)
     # Relationships
     household = relationship("Household", back_populates="report_snapshots")
+
+
+class PlannedPurchase(Base):
+    """A planned future purchase tracked for affordability analysis."""
+    __tablename__ = "planned_purchases"
+    id = Column(Integer, primary_key=True, index=True)
+    household_id = Column(Integer, ForeignKey("households.id", ondelete="CASCADE"), nullable=False)
+    person_id = Column(Integer, ForeignKey("persons.id", ondelete="SET NULL"), nullable=True)
+    title = Column(String, nullable=False)
+    category = Column(String, nullable=True)
+    estimated_amount = Column(Float, nullable=False, default=0.0)
+    priority = Column(String, nullable=False, default="optional")  # essential / important / optional
+    due_window = Column(String, nullable=True)  # e.g. "2026-05", "this_cycle", "next_month"
+    status = Column(String, nullable=False, default="planned")  # planned / committed / done / deferred
+    note = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    # Relationships
+    household = relationship("Household", back_populates="planned_purchases")
+    person = relationship("Person")

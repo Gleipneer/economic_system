@@ -20,6 +20,54 @@ from pydantic import BaseModel, Field, confloat, root_validator
 from .models import IncomeFrequency, LoanRepaymentModel, VariabilityClass, Controllability, SubscriptionCategory
 
 
+# -------- Auth & Users --------
+class AppUserBase(BaseModel):
+    username: str
+    household_id: Optional[int] = None
+
+class AppUserCreate(BaseModel):
+    username: str
+    password: str
+    household_name: Optional[str] = None
+
+class AppUserRead(AppUserBase):
+    id: int
+    created_at: datetime
+    class Config:
+        orm_mode = True
+
+class Token(BaseModel):
+    access_token: str
+    token_type: str
+
+# -------- ImportSession --------
+class UnresolvedQuestionBase(BaseModel):
+    import_session_id: int
+    kind: str
+    question_text: str
+    related_refs: Optional[Any] = None
+    confidence: Optional[float] = None
+    answer: Optional[str] = None
+    status: Optional[str] = Field(default="pending")
+
+class UnresolvedQuestionRead(UnresolvedQuestionBase):
+    id: int
+    created_at: datetime
+    class Config:
+        orm_mode = True
+
+class ImportSessionBase(BaseModel):
+    household_id: int
+    label: str
+    status: Optional[str] = Field(default="active")
+
+class ImportSessionRead(ImportSessionBase):
+    id: int
+    created_at: datetime
+    unresolved_questions: List[UnresolvedQuestionRead] = Field(default_factory=list)
+    class Config:
+        orm_mode = True
+
 # -------- Household --------
 class HouseholdBase(BaseModel):
     name: str
@@ -44,6 +92,37 @@ class HouseholdRead(HouseholdBase):
     class Config:
         orm_mode = True
 
+# -------- Chat --------
+class ChatMessageCreate(BaseModel):
+    role: str
+    message_type: str = "message"
+    content_text: str
+    content_json: Optional[Any] = None
+
+class ChatMessageRead(BaseModel):
+    id: int
+    thread_id: int
+    role: str
+    message_type: str
+    content_text: str
+    content_json: Optional[Any] = None
+    created_at: datetime
+
+    class Config:
+        orm_mode = True
+
+class ChatThreadRead(BaseModel):
+    id: int
+    household_id: int
+    label: Optional[str] = None
+    is_active: bool
+    created_at: datetime
+    updated_at: datetime
+
+    messages: List[ChatMessageRead] = Field(default_factory=list)
+
+    class Config:
+        orm_mode = True
 
 # -------- Person --------
 class PersonBase(BaseModel):
@@ -196,6 +275,7 @@ class RecurringCostBase(BaseModel):
     due_day: Optional[int] = None
     start_date: Optional[date] = None
     end_date: Optional[date] = None
+    status: Optional[str] = Field(default="active")
     note: Optional[str] = None
 
 
@@ -218,6 +298,7 @@ class RecurringCostUpdate(RecurringCostBase):
     due_day: Optional[int] = None
     start_date: Optional[date] = None
     end_date: Optional[date] = None
+    status: Optional[str] = None
     note: Optional[str] = None
 
 
@@ -259,6 +340,7 @@ class SubscriptionContractBase(BaseModel):
     last_negotiated_at: Optional[date] = None
     next_review_at: Optional[date] = None
     latest_invoice_doc_id: Optional[int] = None
+    status: Optional[str] = Field(default="active")
     note: Optional[str] = None
 
 
@@ -295,6 +377,7 @@ class SubscriptionContractUpdate(SubscriptionContractBase):
     last_negotiated_at: Optional[date] = None
     next_review_at: Optional[date] = None
     latest_invoice_doc_id: Optional[int] = None
+    status: Optional[str] = None
     note: Optional[str] = None
 
 
@@ -610,7 +693,7 @@ class DocumentEntityResolutionRead(BaseModel):
 
 
 class DocumentApplyMutationRead(BaseModel):
-    entity_type: Literal["loan", "vehicle", "draft"]
+    entity_type: str
     action: Literal["created", "updated", "linked", "skipped", "manual_review"]
     entity_id: Optional[int] = None
     label: str
@@ -943,13 +1026,31 @@ class AIUsageRead(BaseModel):
     total_tokens: Optional[int] = None
 
 
+class AssistantWriteIntentRead(BaseModel):
+    intent: Literal["create_expense", "create_income", "create_planned_purchase", "create_subscription", "delete_entity", "update_entity", "none"]
+    target_entity_type: Optional[str] = None
+    confidence: Optional[float] = None
+    data: Dict[str, Any] = Field(default_factory=dict)
+    missing_fields: List[str] = Field(default_factory=list)
+    ambiguities: List[str] = Field(default_factory=list)
+
+
 class AssistantPromptResponse(BaseModel):
     household_id: int
     prompt: str
     answer: str
+    questions: List[str] = Field(default_factory=list)
+    write_intent: Optional[AssistantWriteIntentRead] = None
     provider: str
     model: str
     usage: Optional[AIUsageRead] = None
+
+
+class AssistantIntentApplyRequest(BaseModel):
+    intent: str
+    target_entity_type: Optional[str] = None
+    data: Dict[str, Any]
+    source_message_id: Optional[int] = None
 
 
 # -------- MerchantAlias --------
@@ -1002,8 +1103,11 @@ class IngestInputRead(BaseModel):
     source_name: Optional[str] = None
     text_length: int
     text_truncated: bool = False
+    text_chunked: bool = False
+    chunk_count: Optional[int] = None
     extraction_mode: str
     extraction_notes: List[str] = Field(default_factory=list)
+    structured_data: Optional[Dict[str, Any]] = None
 
 
 class IngestDocumentSummaryRead(BaseModel):
@@ -1050,6 +1154,7 @@ class IngestAnalyzeRequest(BaseModel):
 
 
 class IngestAnalyzeResponse(BaseModel):
+    analysis_result_id: str
     household_id: int
     source_name: Optional[str] = None
     input_kind: str
@@ -1069,6 +1174,7 @@ class IngestAnalyzeResponse(BaseModel):
 
 
 class IngestPromoteRequest(BaseModel):
+    analysis_result_id: Optional[str] = None
     input_text: Optional[str] = None
     input_kind: Optional[str] = Field(default="unknown")
     source_channel: Literal["text", "pdf_text", "uploaded_document", "uploaded_pdf", "image", "bank_paste"] = "text"
@@ -1098,6 +1204,7 @@ class CreatedDraftRead(BaseModel):
 
 
 class IngestPromoteResponse(BaseModel):
+    analysis_result_id: str
     household_id: int
     document_id: int
     document_type: str

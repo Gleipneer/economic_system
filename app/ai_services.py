@@ -1,16 +1,19 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from collections import defaultdict
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Literal
+from uuid import uuid4
 
 import httpx
 from pydantic import BaseModel, Field, ValidationError, confloat
 from sqlalchemy.orm import Session
 
 from . import calculations, models, schemas
+from .analysis.pipeline import build_analysis_output
 from .ingest_content import detect_input_hints, extract_text_from_upload, normalize_ingest_text
 from .settings import Settings
 
@@ -18,6 +21,7 @@ from .settings import Settings
 DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
 SUPPORTED_INGEST_TARGETS = {"recurring_cost", "subscription_contract", "loan", "income_source"}
 SUPPORTED_INGEST_INPUT_MEDIUMS = {"text", "pdf_text", "uploaded_document", "uploaded_pdf", "image", "bank_paste"}
+INGEST_ANALYSIS_SCHEMA_VERSION = "ingest-analysis-v1"
 
 
 class AIProviderUnavailableError(RuntimeError):
@@ -37,8 +41,19 @@ class StrictModel(BaseModel):
         extra = "forbid"
 
 
+class AssistantWriteIntent(StrictModel):
+    intent: Literal["create_expense", "create_income", "create_planned_purchase", "create_subscription", "delete_entity", "update_entity", "none"] = "none"
+    target_entity_type: str | None = None
+    confidence: confloat(ge=0.0, le=1.0) | None = None
+    data: dict[str, Any] = {}
+    missing_fields: list[str] = []
+    ambiguities: list[str] = []
+
+
 class AnalysisStructuredOutput(StrictModel):
     answer_markdown: str
+    questions_to_user: list[str] = []
+    write_intent: AssistantWriteIntent | None = None
 
 
 class IngestDocumentClassificationOutput(StrictModel):
@@ -321,7 +336,13 @@ def _compact_household_context(db: Session, household_id: int) -> dict[str, Any]
             "monthly_cost": round(calculations.estimate_vehicle_monthly_cost(item), 2),
         }
 
+    analysis = build_analysis_output(db, household_id)
+    analysis_dict = json.loads(analysis.json()) if hasattr(analysis, "json") else analysis
+    review_queue = _review_queue(records)
+    pending_import_questions = _pending_import_questions(db, household_id)
+
     return {
+        "analysis_contract": analysis_dict,
         "summary": summary,
         "people": [{"id": person_id, "name": name} for person_id, name in people.items()],
         "recurring_costs": [recurring_item(item) for item in recurring_costs],
@@ -343,8 +364,53 @@ def _compact_household_context(db: Session, household_id: int) -> dict[str, Any]
             ),
             "reports": len(records["report_snapshots"]),
         },
+        "review_queue": review_queue,
+        "pending_import_questions": pending_import_questions,
         "latest_housing_evaluation": latest_housing,
     }
+
+
+def _review_queue(records: dict[str, list[dict[str, Any]]]) -> list[dict[str, Any]]:
+    pending = [
+        item
+        for item in records.get("extraction_drafts", [])
+        if item.get("status") == "pending_review"
+    ]
+    pending.sort(key=lambda item: float(item.get("confidence") or 0.0), reverse=True)
+    return [
+        {
+            "draft_id": item.get("id"),
+            "target_entity_type": item.get("target_entity_type"),
+            "confidence": item.get("confidence"),
+        }
+        for item in pending[:8]
+    ]
+
+
+def _pending_import_questions(db: Session, household_id: int) -> list[dict[str, Any]]:
+    active_session = (
+        db.query(models.ImportSession)
+        .filter_by(household_id=household_id, status="active")
+        .order_by(models.ImportSession.id.desc())
+        .first()
+    )
+    if active_session is None:
+        return []
+    questions = (
+        db.query(models.UnresolvedQuestion)
+        .filter_by(import_session_id=active_session.id, status="pending")
+        .order_by(models.UnresolvedQuestion.id.asc())
+        .all()
+    )
+    return [
+        {
+            "id": question.id,
+            "kind": question.kind,
+            "question_text": question.question_text,
+            "confidence": question.confidence,
+        }
+        for question in questions[:8]
+    ]
 
 
 def _analysis_model(settings: Settings) -> str:
@@ -448,7 +514,7 @@ def _get_household_document_or_404(db: Session, household_id: int, document_id: 
     return document
 
 
-def _read_uploaded_document_text(document: models.Document) -> tuple[str | None, str, list[str]]:
+def _read_uploaded_document_text(document: models.Document) -> tuple[str | None, str, list[str], dict[str, Any] | None]:
     if document.extracted_text:
         channel = "pdf_text" if (document.mime_type or "").lower() == "application/pdf" else "document_text"
         note = (
@@ -456,21 +522,29 @@ def _read_uploaded_document_text(document: models.Document) -> tuple[str | None,
             if channel == "pdf_text"
             else "Redan extraherad text återanvändes från dokumentet."
         )
-        return normalize_ingest_text(document.extracted_text), channel, [note]
+        # Note: we don't store structured_data in DB currently, so we might re-extract if it's a spreadsheet
+        # but for now we follow the existing pattern of using extracted_text if available.
+        # If it's a spreadsheet and we want the deterministic table, we should re-extract.
+        if (document.file_name and any(document.file_name.lower().endswith(ext) for ext in [".xlsx", ".xls", ".csv"])) or \
+           (document.mime_type and any(m in (document.mime_type.lower()) for m in ["excel", "spreadsheet", "csv"])):
+            # Fallthrough to re-extraction to get structured_data
+            pass
+        else:
+            return normalize_ingest_text(document.extracted_text), channel, [note], None
 
     if not document.storage_path:
-        return document.extracted_text, "document_text", ["Dokumentet saknar lagrad fil."]
+        return document.extracted_text, "document_text", ["Dokumentet saknar lagrad fil."], None
 
     file_path = Path(document.storage_path)
     if not file_path.is_absolute():
         file_path = Path.cwd() / file_path
     if not file_path.exists():
-        return document.extracted_text, "document_text", ["Den lagrade filen hittades inte."]
+        return document.extracted_text, "document_text", ["Den lagrade filen hittades inte."], None
 
     raw = file_path.read_bytes()
     extracted = extract_text_from_upload(raw, file_name=document.file_name, mime_type=document.mime_type)
     notes = ["Text försöktes läsas ur lagrad fil."] + extracted.notes
-    return extracted.text, extracted.extraction_mode, notes
+    return extracted.text, extracted.extraction_mode, notes, extracted.structured_data
 
 
 def _resolve_ingest_input(
@@ -489,10 +563,11 @@ def _resolve_ingest_input(
     document_file_name: str | None = None
     resolved_document_id = document_id
     resolved_source_name = source_name
+    structured_data = None
 
     if document_id is not None:
         document = _get_household_document_or_404(db, household_id, document_id)
-        document_text, extraction_mode, document_notes = _read_uploaded_document_text(document)
+        document_text, extraction_mode, document_notes, structured_data = _read_uploaded_document_text(document)
         extraction_notes.extend(document_notes)
         resolved_document_id = document.id
         document_file_name = document.file_name
@@ -538,6 +613,7 @@ def _resolve_ingest_input(
         text_truncated=was_truncated,
         extraction_mode=extraction_mode,
         extraction_notes=extraction_notes,
+        structured_data=structured_data,
     )
     return limited_text, input_details
 
@@ -615,6 +691,36 @@ def _group_ingest_suggestions(
     return review_groups
 
 
+def _canonical_json_hash(payload: dict[str, Any]) -> str:
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _jsonable_dict(payload: BaseModel | dict[str, Any]) -> dict[str, Any]:
+    if isinstance(payload, BaseModel):
+        return json.loads(payload.json())
+    return json.loads(json.dumps(payload, ensure_ascii=False))
+
+
+def _compute_ingest_source_hash(
+    *,
+    household_id: int,
+    source_channel: str,
+    source_name: str | None,
+    document_id: int | None,
+    normalized_input_text: str | None,
+) -> str:
+    return _canonical_json_hash(
+        {
+            "household_id": household_id,
+            "source_channel": source_channel,
+            "source_name": source_name,
+            "document_id": document_id,
+            "normalized_input_text": normalized_input_text,
+        }
+    )
+
+
 def _apply_document_summary_to_document(
     document: models.Document,
     *,
@@ -641,35 +747,67 @@ def _apply_document_summary_to_document(
     return document_type
 
 
+def _call_openai_structured_with_retry(*args, **kwargs):
+    max_retries = 2
+    for attempt in range(max_retries):
+        try:
+            return _call_openai_structured(*args, **kwargs)
+        except AIProviderResponseError as exc:
+            if attempt == max_retries - 1:
+                raise exc
+            import time
+            time.sleep(0.5)
+
 def generate_analysis_answer(
     db: Session,
     household_id: int,
     prompt: str,
+    conversation: list[schemas.AssistantMessageRead] | None,
     settings: Settings,
-) -> tuple[str, str, schemas.AIUsageRead | None]:
+) -> tuple[str, list[str], AssistantWriteIntent | None, str, schemas.AIUsageRead | None]:
     context = _compact_household_context(db, household_id)
     instructions = (
-        "Du är en svensk, lugn och konkret ekonomicoach för ett hushåll. "
-        "Använd bara datan du får. Hitta inte på konton, kostnader eller framtida utfall. "
-        "Svara på svenska. Var read-only och föreslå inga tysta dataskrivningar. "
-        "Om data saknas ska du säga det tydligt. "
-        "Returnera bara kort markdown i fältet answer_markdown. "
-        "Håll svaret under 140 ord och fokusera på 2-4 viktigaste observationerna."
+        "Du är systemets AI-assistent. Din uppgift är at tolka användarens inmatning, svara på frågor och extrahera eventuella intentioner för att skriva till systemet.\n"
+        "REGLER FÖR WRITE-INTENTS OCH FRÅGOR:\n"
+        "1. Om användaren vill lägga till, ändra eller ta bort något (t.ex. 'Jag fick 22 340 i lön' eller 'Lägg till Spotify') måste du skapa ett 'write_intent'.\n"
+        "2. Skriv ALDRIG något dirkekt utan fyll i write_intent så frontend kan be om godkännande.\n"
+        "3. OM DATA SAKNAS (t.ex. belopp, datum, frekvens): Lägg saknade fält i 'missing_fields' och använd 'questions_to_user' för att ställa korta direktfrågor tillbaka (t.ex. 'Vad kostar abonnemanget varje månad?'). Hitta INTE på fält.\n"
+        "4. Om inmatningen är otydlig, förklara hur systemet ser på det och fråga vad som menas.\n"
+        "5. Om inget skrivbehov finns, fyll i none på intent.\n"
+        "REGLER FÖR ANALYS OCH SVAR:\n"
+        "Din primära sanning finns under datastrukturen 'analysis_contract' som innehåller deterministiska moduler (historical_analysis, cycle_analysis, planned_purchases_analysis, subscriptions_analysis, forecast_analysis, alerts, action_primitives, presentation).\n"
+        "Använd den data du får. Hitta inte på egna beräkningar om de redan står i analysis_contract.\n"
+        "Kanoniska poster i analysis_contract är verifierad fakta.\n"
+        "Om användaren frågar vad som är osäkert/obekräftat: redovisa allt i review_queue och pending_import_questions. Ljug inte om review_queue.\n"
+        "Om data saknas berätta det tydligt.\n"
+        "Använd action_primitives när du föreslår nästa steg. Uppfinn inte nya kärnberäkningar.\n"
+        "Returnera alltid kort, koncis markdown i fältet answer_markdown (inga långa formella brev). Målet är ett rappt, modernt chatt-snitt.\n"
+        "Håll answer_markdown under 150 ord."
     )
     payload = {
         "question": prompt,
+        "conversation": [msg.dict() for msg in (conversation or [])],
         "household_context": context,
     }
-    structured, model_name, usage = _call_openai_structured(
+    structured, model_name, usage = _call_openai_structured_with_retry(
         settings,
         model=_analysis_model(settings),
         instructions=instructions,
         payload=payload,
         response_model=AnalysisStructuredOutput,
         schema_name="analysis_response",
-        max_output_tokens=220,
+        max_output_tokens=1000,
     )
-    return _format_analysis_answer(structured), model_name, usage
+
+    answer = _format_analysis_answer(structured)
+
+    questions = context.get("pending_import_questions", [])
+    if questions and "har frågor" not in answer.lower():
+        answer += "\n\n**Otydligheter från dokument:**\n"
+        for q in questions:
+            answer += f"- {q.get('question_text')}\n"
+
+    return answer, structured.questions_to_user, structured.write_intent, model_name, usage
 
 
 def _ingest_field_guides(records: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
@@ -956,6 +1094,8 @@ def analyze_ingest_input(
         "- confirmed_fields får bara innehålla fält som kan läsas direkt ur texten utan gissning. "
         "- Om texten ser ut som en faktura, identifiera leverantör, belopp, valuta, förfallodatum, frekvens. "
         "- Om texten ser ut som ett abonnemang, identifiera leverantör, kostnad/månad, bindning, kategori. "
+        "- Om fältet 'structured_data' finns med tabeller ('tables'), använd dem som primär källa för transaktionsförslag. "
+        "- Verifiera att de deterministiska raderna stämmer och berika dem med kategorisering. "
         "- Skapa suggestions bara när det finns tydligt stöd. "
         "- review_bucket ska matcha den mest sannolika måltypen. "
         "- Hellre unclear med ärlig osäkerhet än säker med felaktig klassificering. "
@@ -988,6 +1128,7 @@ def analyze_ingest_input(
         "document_id": document_id,
         "input_hints": input_hints,
         "raw_text": truncated_input,
+        "structured_data": input_details.structured_data,
         "supported_shapes": _ingest_field_guides(records),
     }
     max_tokens = 1400 if is_bank_paste else 720
@@ -1014,8 +1155,32 @@ def analyze_ingest_input(
     guidance.extend(input_details.extraction_notes)
     if input_details.text_truncated:
         guidance.append("Råtexten trunkerades till 6000 tecken för låg tokenkostnad. Dela upp större underlag vid behov.")
+    analysis_result_id = str(uuid4())
+    stored_result = models.IngestAnalysisResult(
+        analysis_result_id=analysis_result_id,
+        household_id=household_id,
+        document_id=input_details.document_id,
+        source_hash=_compute_ingest_source_hash(
+            household_id=household_id,
+            source_channel=normalized_source_channel,
+            source_name=input_details.source_name,
+            document_id=input_details.document_id,
+            normalized_input_text=truncated_input,
+        ),
+        source_channel=normalized_source_channel,
+        source_name=input_details.source_name,
+        normalized_suggestions=[item.dict() for item in suggestions],
+        document_summary=_jsonable_dict(document_summary),
+        detected_kind=document_summary.document_type,
+        provider="openai",
+        model=model_name,
+        analysis_schema_version=INGEST_ANALYSIS_SCHEMA_VERSION,
+    )
+    db.add(stored_result)
+    db.commit()
     return (
         schemas.IngestAnalyzeResponse(
+            analysis_result_id=analysis_result_id,
             household_id=household_id,
             source_name=input_details.source_name,
             input_kind=_presented_input_kind(input_kind, normalized_source_channel),
@@ -1042,23 +1207,64 @@ def promote_ingest_suggestions(
     household_id: int,
     request_body: schemas.IngestPromoteRequest,
 ) -> schemas.IngestPromoteResponse:
-    normalized_source_channel = _normalize_source_channel(request_body.source_channel, request_body.input_kind)
+    if not request_body.analysis_result_id:
+        raise AIProviderResponseError(
+            "Promote kräver analysis_result_id från serverägd analyze-provenance."
+        )
+    stored_result = (
+        db.query(models.IngestAnalysisResult)
+        .filter_by(household_id=household_id, analysis_result_id=request_body.analysis_result_id)
+        .first()
+    )
+    if not stored_result:
+        raise AIProviderResponseError("analysis_result_id hittades inte för hushållet.")
 
-    valid_suggestions = [item for item in request_body.suggestions if item.validation_status == "valid"]
+    normalized_source_channel = _normalize_source_channel(request_body.source_channel, request_body.input_kind)
+    if normalized_source_channel != stored_result.source_channel:
+        raise AIProviderResponseError("Källkanal matchar inte analyze-resultatet. Kör analyze igen.")
+
+    source_name = request_body.source_name if request_body.source_name is not None else stored_result.source_name
+    if source_name != stored_result.source_name:
+        raise AIProviderResponseError("source_name matchar inte analyze-resultatet. Kör analyze igen.")
+
+    resolved_document_id = stored_result.document_id
+    if request_body.document_id is not None and resolved_document_id is not None and request_body.document_id != resolved_document_id:
+        raise AIProviderResponseError("document_id matchar inte analyze-resultatet. Kör analyze igen.")
+
+    normalized_input_text = normalize_ingest_text(request_body.input_text) if request_body.input_text else None
+    if resolved_document_id is not None and normalized_input_text is None:
+        matched_document = _get_household_document_or_404(db, household_id, resolved_document_id)
+        if matched_document.extracted_text:
+            normalized_input_text = normalize_ingest_text(matched_document.extracted_text)
+    current_source_hash = _compute_ingest_source_hash(
+        household_id=household_id,
+        source_channel=normalized_source_channel,
+        source_name=source_name,
+        document_id=resolved_document_id,
+        normalized_input_text=normalized_input_text,
+    )
+    if current_source_hash != stored_result.source_hash:
+        raise AIProviderResponseError("Källunderlaget matchar inte analyze-resultatet längre. Kör analyze igen.")
+
+    stored_suggestions = [schemas.IngestSuggestionRead(**item) for item in (stored_result.normalized_suggestions or [])]
+    valid_suggestions = [item for item in stored_suggestions if item.validation_status == "valid"]
     if not valid_suggestions:
         raise AIProviderResponseError("Det finns inga validerade förslag att skapa reviewutkast från.")
 
-    normalized_input_text = normalize_ingest_text(request_body.input_text) if request_body.input_text else None
-    document_summary = request_body.document_summary
+    document_summary = (
+        schemas.IngestDocumentSummaryRead(**stored_result.document_summary)
+        if stored_result.document_summary
+        else request_body.document_summary
+    )
     document: models.Document | None = None
 
-    if request_body.document_id is not None:
-        document = _get_household_document_or_404(db, household_id, request_body.document_id)
+    if resolved_document_id is not None:
+        document = _get_household_document_or_404(db, household_id, resolved_document_id)
         if not document.extracted_text and normalized_input_text:
             document.extracted_text = normalized_input_text
             document.extraction_status = "interpreted"
         elif not document.extracted_text:
-            document_text, _, _ = _read_uploaded_document_text(document)
+            document_text, _, _, _ = _read_uploaded_document_text(document)
             if document_text:
                 document.extracted_text = document_text
                 document.extraction_status = "interpreted"
@@ -1068,13 +1274,13 @@ def promote_ingest_suggestions(
             document,
             document_summary=document_summary,
             source_channel=normalized_source_channel,
-            source_name=request_body.source_name,
+            source_name=source_name,
         )
     else:
         if normalized_input_text is None:
             raise AIProviderResponseError("Promote kräver input_text när document_id saknas.")
         timestamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
-        source_stub = (request_body.source_name or "ai-ingest").strip().replace(" ", "-").lower() or "ai-ingest"
+        source_stub = (source_name or "ai-ingest").strip().replace(" ", "-").lower() or "ai-ingest"
         if document_summary is None:
             document_type = _legacy_document_type_for_input(request_body.input_kind or "unknown")
         else:
@@ -1084,7 +1290,7 @@ def promote_ingest_suggestions(
             document_type=document_type,
             file_name=f"{source_stub}-{timestamp}.txt",
             mime_type="text/plain",
-            issuer=request_body.source_name,
+            issuer=source_name,
             extracted_text=normalized_input_text,
             extraction_status="interpreted",
         )
@@ -1094,7 +1300,7 @@ def promote_ingest_suggestions(
             document,
             document_summary=document_summary,
             source_channel=normalized_source_channel,
-            source_name=request_body.source_name,
+            source_name=source_name,
         )
 
     if document is None:
@@ -1113,9 +1319,9 @@ def promote_ingest_suggestions(
             confidence=suggestion.confidence,
             status="pending_review",
             model_name=(
-                f"{request_body.provider}:{request_body.model}"
-                if request_body.provider and request_body.model
-                else request_body.model
+                f"{stored_result.provider}:{stored_result.model}"
+                if stored_result.provider and stored_result.model
+                else stored_result.model
             ),
         )
         db.add(draft)
@@ -1132,9 +1338,10 @@ def promote_ingest_suggestions(
 
     db.commit()
     return schemas.IngestPromoteResponse(
+        analysis_result_id=stored_result.analysis_result_id,
         household_id=household_id,
         document_id=document.id,
         document_type=document_type,
         created_drafts=created_drafts,
-        skipped_suggestions=len(request_body.suggestions) - len(valid_suggestions),
+        skipped_suggestions=len(stored_suggestions) - len(valid_suggestions),
     )
