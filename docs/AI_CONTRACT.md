@@ -192,3 +192,15 @@ påverka resten av systemet, tack vare att:
 - Inte en ersättning för deterministisk matematik
 - Inte en okontrollerad chatbot med fri access till allt
 - Inte en autonom agent som fattar ekonomiska beslut
+
+## Assistant apply UX contract (mobil + desktop)
+
+- `assistant/respond` får skapa `write_intent` men får aldrig skriva kanoniska tabeller direkt.
+- Ett applybart förslag måste vara sparat i chatthistoriken (`chat_messages`) och appliceras med exakt `source_message_id`.
+- UI måste visa tillstånd per förslag:
+  - `Kräver godkännande` när apply är tillåtet.
+  - `Behöver mer information` när `missing_fields` eller följdfrågor finns.
+  - `Sparad` efter lyckad apply/systembekräftelse.
+- UI får inte visa apply-CTA för intent med `missing_fields`, öppna frågor eller osparad källa.
+- Bekräftelsefraser i chatten (t.ex. "skriv in nu") får inte bypassa apply-gateway; svaret ska hänvisa till knappen **Godkänn och spara**.
+- Batch i ett och samma `write_intent` (`proposed_updates` > 1) ska inte auto-applicas om backend-kontrakt saknas; visa blockerat läge eller separata säkra kort.

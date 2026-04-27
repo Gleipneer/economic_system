@@ -65,3 +65,17 @@ Kvarvarande/partiellt:
 ## Plan
 - [x] Skapa ett komplett granskningsdokument som sammanfattar nuläge, styrkor, svagheter, framtida expansioner och poängsättning.
 - [x] Hänvisa till verifierade källor och senaste genomgången utan att ersätta kanoniska sanningsdokument.
+
+## Plan - Assistant apply workflow + mobil UX 2026-04-27
+- [x] Diagnostisera write/apply-kedjan (persistens, source_message_id, apply-endpoint, replay/missing-fields-guard).
+- [x] Implementera tydliga action-cards för write_intent med apply/blockerat tillstånd.
+- [x] Förbättra mobilchatten till single-column med kollapsbart ekonomiläge och säkrare composer-scroll.
+- [x] Behåll safety-contract: inget auto-write i `assistant/respond`, explicit apply med `source_message_id`.
+- [ ] Verifiera med backendtester, frontendmodultester, runtime-health och diff-check.
+
+## Review - Assistant apply workflow + mobil UX 2026-04-27
+- Backend: svar på bekräftelsefraser ("skriv in nu") leder till apply-hänvisning, inte canonical write.
+- Backend: assistant-historik till modellen är kompakterad (färre roller, kortare innehåll) för lägre tokenkostnad.
+- Frontend: write_intent visas som tydligt ändringskort med status + CTA "Godkänn och spara" när apply är tillåtet.
+- Frontend: missing_fields/frågor blockerar apply-CTA, batchförslag utan backend-kontrakt markeras som blockerade.
+- Frontend: mobilvy använder single-column, togglad ekonomiöversikt och förbättrad bottenpadding/safe-area i chatten.

@@ -259,6 +259,14 @@ begränsad driftobservability. Om nästa utvecklingspass fokuserar på provenanc
 hotspot-uppdelning och kontinuerlig dataförsörjning kan systemet realistiskt
 höjas från **79/100** till cirka **86-90/100** för ett självhostat hushållsbruk.
 
+## Patchnote 2026-04-27 (kväll) - Assistant apply UX + mobilchat
+
+- Assistantens write/apply-flöde är nu praktiskt användbart i UI: tydliga ändringskort, tillståndsetiketter och CTA **Godkänn och spara** när förslaget är applybart.
+- Svar med `missing_fields`/frågor visar blockerat läge ("Behöver mer information") utan apply-knapp.
+- Bekräftelseprompter som "skriv in nu" bypassar inte säkerhetsgränsen; backend svarar med explicit hänvisning till godkännandeknappen.
+- Mobilvy är omgjord till single-column chat med kollapsbart ekonomiläge, förbättrad scrollyta och composer-safe-area-padding.
+- Kontextmängden till assistanten är reducerad via kortare och mer kompakt historik i backend, för lägre tokenkostnad.
+
 ## Verifieringsnotering 2026-04-27 (kvalitetskedja)
 
 - `analysis_result_id` är persistat i serverägd DB-lagring via tabellen

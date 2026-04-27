@@ -25,7 +25,7 @@ import hashlib
 from datetime import date, datetime
 from pathlib import Path
 from uuid import uuid4
-from typing import Any, List
+from typing import Any, List, Optional
 
 from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form, Body, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -33,7 +33,10 @@ from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 
-from . import ai_services, calculations, database, models, pdf_export, schemas
+from . import ai_services, calculations, database, import_services, models, pdf_export, schemas, auth
+from .analysis import schemas as analysis_schemas
+from .analysis.cycle_engine import compute_cycle_status
+from .analysis.pipeline import build_analysis_output
 from .ingest_content import extract_text_from_upload, normalize_ingest_text
 from .settings import get_settings
 
@@ -49,6 +52,98 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.include_router(auth.router)
+
+
+from fastapi import Request
+
+API_ROUTE_PREFIXES = (
+    "/households",
+    "/persons",
+    "/income_sources",
+    "/loans",
+    "/recurring_costs",
+    "/subscription_contracts",
+    "/insurance_policies",
+    "/vehicles",
+    "/financial_assets",
+    "/housing_scenarios",
+    "/documents",
+    "/extraction_drafts",
+    "/optimization_opportunities",
+    "/scenarios",
+    "/scenario_results",
+    "/report_snapshots",
+    "/system",
+)
+
+
+def _is_public_frontend_request(request: Request) -> bool:
+    path = request.url.path
+    if path.startswith("/assets") or path.startswith("/static") or path.startswith("/auth"):
+        return True
+    if path in {"/", "/healthz", "/docs", "/openapi.json", "/favicon.ico"}:
+        return True
+    if request.method not in {"GET", "HEAD"}:
+        return False
+    return not any(path == prefix or path.startswith(f"{prefix}/") for prefix in API_ROUTE_PREFIXES)
+
+
+def _should_disable_cache(path: str) -> bool:
+    if path in {"/healthz", "/docs", "/openapi.json"} or path.startswith("/auth"):
+        return False
+    if path == "/favicon.ico":
+        return True
+    if path.startswith("/assets") or path.startswith("/static"):
+        return True
+    return not any(path == prefix or path.startswith(f"{prefix}/") for prefix in API_ROUTE_PREFIXES)
+
+# Basic Auth protection wrapper for endpoints
+@app.middleware("http")
+async def auth_middleware(request: Request, call_next):
+    if _is_public_frontend_request(request):
+        response = await call_next(request)
+        if _should_disable_cache(request.url.path):
+            response.headers["Cache-Control"] = "no-store"
+        return response
+
+    import os
+    if os.environ.get("BYPASS_AUTH", "false").lower() == "true":
+        request.state.user_id = 999
+        response = await call_next(request)
+        if _should_disable_cache(request.url.path):
+            response.headers["Cache-Control"] = "no-store"
+        return response
+
+    # Check for Bearer token
+    auth_header = request.headers.get("Authorization")
+    if not auth_header or not auth_header.startswith("Bearer "):
+        # Check cookies too for SPA convenience
+        token = request.cookies.get("he_session")
+        if not token:
+            return Response("Unauthorized. Please log in.", status_code=401)
+    else:
+        token = auth_header.split(" ")[1]
+
+    # Validate token (in our MVP, token is just a random hex string stored in AuthSession)
+    db = database.SessionLocal()
+    session = db.query(models.AuthSession).filter(models.AuthSession.session_token == token).first()
+    if not session or session.expires_at < datetime.utcnow():
+        db.close()
+        return Response("Session expired or invalid", status_code=401)
+
+    # Extend session slightly on activity
+    try:
+        request.state.user_id = session.user_id
+        # Optionally extend logic here
+    finally:
+        db.close()
+
+    response = await call_next(request)
+    if _should_disable_cache(request.url.path):
+        response.headers["Cache-Control"] = "no-store"
+    return response
 
 # Dependency that provides a database session per request. The session
 # is cleaned up automatically once the request is finished. If you
@@ -82,12 +177,19 @@ def healthz():
     return {"status": "ok"}
 
 
+@app.get("/favicon.ico", include_in_schema=False)
+def favicon():
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
 @app.get("/system/validation_markdown", include_in_schema=False)
 def system_validation_markdown():
     return FileResponse(Path(__file__).resolve().parents[1] / "docs" / "SYSTEM_VALIDATION.md")
 
 if STATIC_ROOT.exists():
     app.mount("/assets", StaticFiles(directory=STATIC_ROOT), name="assets")
+    # Also mount static for users who already cached the /static paths
+    app.mount("/static", StaticFiles(directory=STATIC_ROOT), name="static")
 
 
 @app.get("/")
@@ -95,8 +197,21 @@ def home():
     return FileResponse(STATIC_ROOT / "index.html")
 
 
-def ensure_household_exists(db: Session, household_id: int):
-    return get_object_or_404(db, models.Household, household_id)
+def _request_household_id(request: Request, db: Session) -> int | None:
+    user_id = getattr(request.state, "user_id", None)
+    if user_id in {None, 999}:
+        return None
+    user = db.get(models.AppUser, user_id)
+    return user.household_id if user is not None else None
+
+
+def ensure_household_exists(db: Session, household_id: int, request: Request | None = None):
+    household = get_object_or_404(db, models.Household, household_id)
+    if request is not None:
+        allowed_household_id = _request_household_id(request, db)
+        if allowed_household_id is not None and allowed_household_id != household_id:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Hushållet tillhör inte den inloggade användaren.")
+    return household
 
 
 DOCUMENT_WORKFLOW_STATUS = {
@@ -257,9 +372,39 @@ def _status_label_for_workflow(document: models.Document, drafts: list[models.Ex
 def _status_for_uploaded_document(extracted_text: str | None, extraction_mode: str) -> tuple[str, str | None]:
     if extracted_text and extracted_text.strip():
         return "interpreted", None
-    if extraction_mode in {"unsupported_binary", "pdf_unreadable", "ocr_image_unreadable", "ocr_failed", "ocr_no_text"}:
-        return "failed", f"Det gick inte att tolka dokumentet ({extraction_mode})."
+
+    error_map = {
+        "unsupported_binary": "Filtypen stöds inte.",
+        "pdf_unreadable": "PDF-filen är skadad eller lösenordsskyddad.",
+        "ocr_image_unreadable": "Bilden kunde inte läsas av OCR-motorn.",
+        "ocr_failed": "OCR-analysen misslyckades oväntat.",
+        "ocr_no_text": "Hittade ingen text i bilden (för suddig eller tom?).",
+        "spreadsheet_unreadable": "Kalkylbladet kunde inte läsas (skadad eller skyddad fil).",
+        "spreadsheet_missing_dependency": "Systemet saknar bibliotek för att läsa denna filtyp.",
+        "excel_legacy_unsupported": "Äldre Excel-format stöds inte (spara som .xlsx).", # Keeping for safety though removed from ingest
+    }
+
+    if extraction_mode in error_map:
+        return "failed", f"Det gick inte att tolka dokumentet: {error_map[extraction_mode]} ({extraction_mode})"
+
     return "uploaded", None
+
+
+def _public_ai_error_detail(exc: Exception, *, surface: str) -> str:
+    detail = str(exc)
+    lowered = detail.lower()
+
+    if any(token in lowered for token in ("ogiltig json", "utan läsbar text", "responses api", "json för", "schema")):
+        if surface == "assistant":
+            return "AI-assistenten kunde inte validera svaret just nu. Försök igen om en stund."
+        return "AI-tolkningen kunde inte slutföras för underlaget. Försök igen eller korrigera texten manuellt."
+
+    if "openai-anropet misslyckades" in lowered:
+        if surface == "assistant":
+            return "AI-assistenten kunde inte svara just nu. Försök igen om en stund."
+        return "AI-tolkningen kunde inte slutföras just nu. Försök igen eller använd råtextfältet."
+
+    return detail
 
 
 def _draft_status_detail(drafts: list[models.ExtractionDraft]) -> str | None:
@@ -1412,8 +1557,12 @@ def create_or_get_opportunity(
 
 # --- Household Endpoints ---
 @app.get("/households", response_model=List[schemas.HouseholdRead])
-def list_households(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
-    return db.query(models.Household).offset(skip).limit(limit).all()
+def list_households(request: Request, skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
+    allowed_household_id = _request_household_id(request, db)
+    query = db.query(models.Household)
+    if allowed_household_id is not None:
+        query = query.filter(models.Household.id == allowed_household_id)
+    return query.offset(skip).limit(limit).all()
 
 
 @app.post("/households", response_model=schemas.HouseholdRead, status_code=status.HTTP_201_CREATED)
@@ -1426,13 +1575,13 @@ def create_household(household: schemas.HouseholdCreate, db: Session = Depends(g
 
 
 @app.get("/households/{household_id}", response_model=schemas.HouseholdRead)
-def read_household(household_id: int, db: Session = Depends(get_db)):
-    return get_object_or_404(db, models.Household, household_id)
+def read_household(household_id: int, request: Request, db: Session = Depends(get_db)):
+    return ensure_household_exists(db, household_id, request)
 
 
 @app.put("/households/{household_id}", response_model=schemas.HouseholdRead)
-def update_household(household_id: int, household: schemas.HouseholdUpdate, db: Session = Depends(get_db)):
-    db_household = get_object_or_404(db, models.Household, household_id)
+def update_household(household_id: int, household: schemas.HouseholdUpdate, request: Request, db: Session = Depends(get_db)):
+    db_household = ensure_household_exists(db, household_id, request)
     for field, value in household.dict(exclude_unset=True).items():
         setattr(db_household, field, value)
     db.commit()
@@ -1441,16 +1590,16 @@ def update_household(household_id: int, household: schemas.HouseholdUpdate, db: 
 
 
 @app.delete("/households/{household_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_household(household_id: int, db: Session = Depends(get_db)):
-    db_household = get_object_or_404(db, models.Household, household_id)
+def delete_household(household_id: int, request: Request, db: Session = Depends(get_db)):
+    db_household = ensure_household_exists(db, household_id, request)
     db.delete(db_household)
     db.commit()
     return
 
 
 @app.get("/households/{household_id}/summary", response_model=schemas.HouseholdSummaryRead)
-def get_household_summary(household_id: int, db: Session = Depends(get_db)):
-    ensure_household_exists(db, household_id)
+def get_household_summary(household_id: int, request: Request, db: Session = Depends(get_db)):
+    ensure_household_exists(db, household_id, request)
     return calculations.build_household_summary(calculations.load_household_records(db, household_id), household_id)
 
 
@@ -1458,9 +1607,10 @@ def get_household_summary(household_id: int, db: Session = Depends(get_db)):
 def generate_household_report_snapshot(
     household_id: int,
     request: schemas.ReportGenerateRequest,
+    http_request: Request,
     db: Session = Depends(get_db),
 ):
-    ensure_household_exists(db, household_id)
+    ensure_household_exists(db, household_id, http_request)
     summary = calculations.build_household_summary(calculations.load_household_records(db, household_id), household_id)
     snapshot = models.ReportSnapshot(
         household_id=household_id,
@@ -1476,8 +1626,8 @@ def generate_household_report_snapshot(
 
 
 @app.get("/households/{household_id}/export/bank_pdf")
-def export_bank_pdf(household_id: int, db: Session = Depends(get_db)):
-    ensure_household_exists(db, household_id)
+def export_bank_pdf(household_id: int, request: Request, db: Session = Depends(get_db)):
+    ensure_household_exists(db, household_id, request)
     pdf_bytes = pdf_export.generate_bank_pdf(db, household_id)
     household = db.get(models.Household, household_id)
     filename = f"bankkalkyl-{household.name.lower().replace(' ', '-')}-{date.today().isoformat()}.pdf"
@@ -1489,8 +1639,8 @@ def export_bank_pdf(household_id: int, db: Session = Depends(get_db)):
 
 
 @app.post("/households/{household_id}/optimization_scan", response_model=List[schemas.OptimizationOpportunityRead])
-def optimization_scan(household_id: int, db: Session = Depends(get_db)):
-    ensure_household_exists(db, household_id)
+def optimization_scan(household_id: int, request: Request, db: Session = Depends(get_db)):
+    ensure_household_exists(db, household_id, request)
     results = []
 
     subscriptions = db.query(models.SubscriptionContract).filter_by(household_id=household_id).all()
@@ -1824,12 +1974,12 @@ def delete_vehicle(vehicle_id: int, db: Session = Depends(get_db)):
 
 
 # --- Asset Endpoints ---
-@app.get("/assets", response_model=List[schemas.AssetRead])
+@app.get("/financial_assets", response_model=List[schemas.AssetRead])
 def list_assets(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
     return db.query(models.Asset).offset(skip).limit(limit).all()
 
 
-@app.post("/assets", response_model=schemas.AssetRead, status_code=status.HTTP_201_CREATED)
+@app.post("/financial_assets", response_model=schemas.AssetRead, status_code=status.HTTP_201_CREATED)
 def create_asset(asset: schemas.AssetCreate, db: Session = Depends(get_db)):
     db_asset = models.Asset(**asset.dict())
     db.add(db_asset)
@@ -1838,12 +1988,12 @@ def create_asset(asset: schemas.AssetCreate, db: Session = Depends(get_db)):
     return db_asset
 
 
-@app.get("/assets/{asset_id}", response_model=schemas.AssetRead)
+@app.get("/financial_assets/{asset_id}", response_model=schemas.AssetRead)
 def read_asset(asset_id: int, db: Session = Depends(get_db)):
     return get_object_or_404(db, models.Asset, asset_id)
 
 
-@app.put("/assets/{asset_id}", response_model=schemas.AssetRead)
+@app.put("/financial_assets/{asset_id}", response_model=schemas.AssetRead)
 def update_asset(asset_id: int, asset: schemas.AssetUpdate, db: Session = Depends(get_db)):
     db_asset = get_object_or_404(db, models.Asset, asset_id)
     for field, value in asset.dict(exclude_unset=True).items():
@@ -1853,7 +2003,7 @@ def update_asset(asset_id: int, asset: schemas.AssetUpdate, db: Session = Depend
     return db_asset
 
 
-@app.delete("/assets/{asset_id}", status_code=status.HTTP_204_NO_CONTENT)
+@app.delete("/financial_assets/{asset_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_asset(asset_id: int, db: Session = Depends(get_db)):
     db_asset = get_object_or_404(db, models.Asset, asset_id)
     db.delete(db_asset)
@@ -2295,14 +2445,14 @@ def delete_report_snapshot(snapshot_id: int, db: Session = Depends(get_db)):
 
 # --- Merchant Alias Endpoints ---
 @app.get("/households/{household_id}/merchant_aliases", response_model=List[schemas.MerchantAliasRead])
-def list_merchant_aliases(household_id: int, db: Session = Depends(get_db)):
-    ensure_household_exists(db, household_id)
+def list_merchant_aliases(household_id: int, request: Request, db: Session = Depends(get_db)):
+    ensure_household_exists(db, household_id, request)
     return db.query(models.MerchantAlias).filter_by(household_id=household_id).all()
 
 
 @app.post("/households/{household_id}/merchant_aliases", response_model=schemas.MerchantAliasRead, status_code=status.HTTP_201_CREATED)
-def create_merchant_alias(household_id: int, alias: schemas.MerchantAliasCreate, db: Session = Depends(get_db)):
-    ensure_household_exists(db, household_id)
+def create_merchant_alias(household_id: int, alias: schemas.MerchantAliasCreate, request: Request, db: Session = Depends(get_db)):
+    ensure_household_exists(db, household_id, request)
     db_alias = models.MerchantAlias(household_id=household_id, alias=alias.alias.strip().lower(), canonical_name=alias.canonical_name.strip(), category_hint=alias.category_hint)
     db.add(db_alias)
     db.commit()
@@ -2311,7 +2461,8 @@ def create_merchant_alias(household_id: int, alias: schemas.MerchantAliasCreate,
 
 
 @app.delete("/households/{household_id}/merchant_aliases/{alias_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_merchant_alias(household_id: int, alias_id: int, db: Session = Depends(get_db)):
+def delete_merchant_alias(household_id: int, alias_id: int, request: Request, db: Session = Depends(get_db)):
+    ensure_household_exists(db, household_id, request)
     alias = db.get(models.MerchantAlias, alias_id)
     if alias is None or alias.household_id != household_id:
         raise HTTPException(status_code=404, detail="Alias hittades inte.")
@@ -2326,36 +2477,876 @@ def evaluate_housing_scenario_endpoint(scenario_id: int, db: Session = Depends(g
     return calculations.evaluate_housing_scenario(scenario)
 
 
+@app.post("/households/{household_id}/assistant/import_files", response_model=schemas.AssistantPromptResponse)
+def import_files_endpoint(
+    household_id: int,
+    request: Request,
+    files: List[UploadFile] = File(...),
+    prompt: str | None = Form(None),
+    db: Session = Depends(get_db)
+):
+    ensure_household_exists(db, household_id, request)
+    thread = _get_active_chat_thread(db, household_id)
+    staged_documents: list[models.Document] = []
+
+    for upload in files:
+        storage_path, checksum, raw = upload_to_disk(household_id, upload)
+        extracted = extract_text_from_upload(raw, file_name=upload.filename, mime_type=upload.content_type)
+        extraction_status, processing_error = _status_for_uploaded_document(extracted.text, extracted.extraction_mode)
+        document = models.Document(
+            household_id=household_id,
+            document_type="receipt",
+            file_name=upload.filename or "uploaded-file",
+            mime_type=upload.content_type,
+            checksum=checksum,
+            extracted_text=extracted.text,
+            extraction_status=extraction_status,
+            processing_error=processing_error,
+            storage_path=storage_path,
+        )
+        db.add(document)
+        db.flush()
+        staged_documents.append(document)
+
+    db.commit()
+
+    answer_lines = [
+        "Jag lade filerna i **Dokument** för riktig tolkning och granskning.",
+        "Assistentchatten skriver inte filer direkt till ekonomin och simulerar inte längre import här.",
+    ]
+    if prompt and prompt.strip():
+        answer_lines.append("Din fråga sparades inte mot filerna ännu. Kör granskning/apply i Dokument först och fråga sedan assistenten.")
+    answer_lines.append("")
+    for document in staged_documents:
+        status_label = _status_label_sv(document.extraction_status)
+        note = "Text kunde extraheras." if document.extracted_text else (document.processing_error or "Ingen text kunde extraheras ännu.")
+        answer_lines.append(f"- {document.file_name}: {status_label}. {note}")
+    answer_lines.append("")
+    answer_lines.append("Nästa steg: öppna **Dokument**, analysera underlaget och skapa reviewutkast därifrån.")
+
+    file_names = [document.file_name for document in staged_documents]
+    document_ids = [document.id for document in staged_documents]
+    prompt_text = prompt or f"Laddade upp {len(staged_documents)} filer i assistenten."
+    _append_chat_message(
+        db,
+        household_id,
+        "user",
+        prompt_text,
+        message_type="user_upload",
+        content_json={
+            "file_names": file_names,
+            "document_ids": document_ids,
+        },
+        thread=thread,
+    )
+    _append_chat_message(
+        db,
+        household_id,
+        "system",
+        "\n".join(answer_lines),
+        message_type="system_import_notice",
+        content_json={
+            "document_ids": document_ids,
+            "file_names": file_names,
+            "provider": "system",
+            "model": "document-staging-v1",
+            "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+        },
+        thread=thread,
+    )
+
+    return {
+        "household_id": household_id,
+        "prompt": prompt or f"Laddade upp {len(files)} filer.",
+        "answer": "\n".join(answer_lines),
+        "provider": "system",
+        "model": "document-staging-v1",
+        "usage": schemas.AIUsageRead(input_tokens=0, output_tokens=0, total_tokens=0),
+    }
+
+def _get_active_chat_thread(db: Session, household_id: int) -> models.ChatThread:
+    thread = db.query(models.ChatThread).filter_by(household_id=household_id, is_active=True).first()
+    if not thread:
+        thread = models.ChatThread(household_id=household_id, label="General Discussion")
+        db.add(thread)
+        db.commit()
+        db.refresh(thread)
+    return thread
+
+
+def _append_chat_message(
+    db: Session,
+    household_id: int,
+    role: str,
+    content_text: str,
+    *,
+    message_type: str,
+    content_json: dict[str, Any] | None = None,
+    thread: models.ChatThread | None = None,
+) -> models.ChatMessage:
+    thread = thread or _get_active_chat_thread(db, household_id)
+    thread.updated_at = datetime.utcnow()
+    message = models.ChatMessage(
+        thread_id=thread.id,
+        role=role,
+        message_type=message_type,
+        content_text=content_text,
+        content_json=content_json,
+    )
+    db.add(thread)
+    db.add(message)
+    db.commit()
+    db.refresh(message)
+    return message
+
+
+def _assistant_conversation_from_thread(
+    db: Session,
+    thread_id: int,
+    *,
+    exclude_message_id: int | None = None,
+    limit: int = 10,
+) -> list[schemas.AssistantMessageRead]:
+    query = db.query(models.ChatMessage).filter(models.ChatMessage.thread_id == thread_id)
+    if exclude_message_id is not None:
+        query = query.filter(models.ChatMessage.id != exclude_message_id)
+    messages = query.order_by(models.ChatMessage.id.asc()).all()[-limit:]
+    conversation: list[schemas.AssistantMessageRead] = []
+    for message in messages:
+        if message.role not in {"user", "assistant"}:
+            continue
+        compact_content = (message.content_text or "").strip()
+        if len(compact_content) > 500:
+            compact_content = f"{compact_content[:500]}..."
+        conversation.append(schemas.AssistantMessageRead(role=message.role, content=compact_content))
+    return conversation
+
+
+def _find_pending_applyable_write_intent(
+    db: Session,
+    household_id: int,
+    thread_id: int,
+) -> models.ChatMessage | None:
+    assistant_messages = (
+        db.query(models.ChatMessage)
+        .filter(
+            models.ChatMessage.thread_id == thread_id,
+            models.ChatMessage.role == "assistant",
+            models.ChatMessage.message_type == "assistant_response",
+        )
+        .order_by(models.ChatMessage.id.desc())
+        .all()
+    )
+    for candidate in assistant_messages:
+        write_intent = (candidate.content_json or {}).get("write_intent") or {}
+        if not write_intent or write_intent.get("intent") in {None, "none"}:
+            continue
+        if write_intent.get("missing_fields"):
+            continue
+        already_applied = (
+            db.query(models.ChatMessage.id)
+            .filter(
+                models.ChatMessage.thread_id == thread_id,
+                models.ChatMessage.role == "system",
+                models.ChatMessage.message_type == "system_confirmation",
+                models.ChatMessage.content_json["source_message_id"].as_integer() == candidate.id,
+            )
+            .first()
+        )
+        if already_applied:
+            continue
+        return candidate
+    return None
+
+
+def _is_apply_confirmation_prompt(prompt: str) -> bool:
+    lowered = (prompt or "").strip().lower()
+    if not lowered:
+        return False
+    confirmation_phrases = (
+        "skriv in",
+        "spara nu",
+        "godkänn nu",
+        "kör på",
+        "ja, skriv",
+        "ja skriv",
+        "lägg in nu",
+    )
+    return any(phrase in lowered for phrase in confirmation_phrases)
+
+@app.get("/households/{household_id}/assistant/thread", response_model=schemas.ChatThreadRead)
+def get_active_thread(
+    household_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    ensure_household_exists(db, household_id, request)
+    thread = _get_active_chat_thread(db, household_id)
+    db.refresh(thread)
+    return thread
+
+@app.post("/households/{household_id}/assistant/thread/reset")
+def reset_active_thread(
+    household_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    ensure_household_exists(db, household_id, request)
+    old_thread = db.query(models.ChatThread).filter_by(household_id=household_id, is_active=True).first()
+    if old_thread:
+        old_thread.is_active = False
+        db.add(old_thread)
+        db.commit()
+    return {"status": "ok"}
+
+
 @app.post(
     "/households/{household_id}/assistant/respond",
     response_model=schemas.AssistantPromptResponse,
 )
 def household_assistant_respond(
     household_id: int,
+    request: Request,
     request_body: schemas.AssistantPromptRequest,
     db: Session = Depends(get_db),
 ):
-    ensure_household_exists(db, household_id)
+    ensure_household_exists(db, household_id, request)
+
+    thread = _get_active_chat_thread(db, household_id)
+
+    user_message = _append_chat_message(
+        db,
+        household_id,
+        "user",
+        request_body.prompt,
+        message_type="user_prompt",
+        thread=thread,
+    )
+
+    handled_by_import, import_answer, import_model = import_services.maybe_handle_assistant_prompt(
+        db,
+        household_id,
+        request_body.prompt,
+    )
+    if handled_by_import:
+        _append_chat_message(
+            db,
+            household_id,
+            "system",
+            import_answer,
+            message_type="system_import_notice",
+            content_json={
+                "provider": "system",
+                "model": import_model,
+                "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+            },
+            thread=thread,
+        )
+        return {
+            "household_id": household_id,
+            "prompt": request_body.prompt,
+            "answer": import_answer,
+            "provider": "system",
+            "model": import_model,
+            "usage": schemas.AIUsageRead(input_tokens=0, output_tokens=0, total_tokens=0),
+        }
+
+    pending_intent_message = None
+    if _is_apply_confirmation_prompt(request_body.prompt):
+        pending_intent_message = _find_pending_applyable_write_intent(db, household_id, thread.id)
+    if pending_intent_message is not None:
+        pending_response_json = {"provider": "system", "model": "assistant-apply-guard"}
+        reminder = "Jag har förberett ändringen. Tryck Godkänn och spara för att skriva den till systemet."
+        _append_chat_message(
+            db,
+            household_id,
+            "assistant",
+            reminder,
+            message_type="assistant_response",
+            content_json=pending_response_json,
+            thread=thread,
+        )
+        return {
+            "household_id": household_id,
+            "prompt": request_body.prompt,
+            "answer": reminder,
+            "questions": [],
+            "write_intent": None,
+            "provider": "system",
+            "model": "assistant-apply-guard",
+            "usage": None,
+        }
+
     try:
-        answer, model_name, usage = ai_services.generate_analysis_answer(
+        answer, questions, write_intent, model_name, usage = ai_services.generate_analysis_answer(
             db,
             household_id,
             request_body.prompt,
+            _assistant_conversation_from_thread(db, thread.id, exclude_message_id=user_message.id),
             settings,
         )
     except ai_services.AIProviderUnavailableError as exc:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
     except ai_services.AIProviderResponseError as exc:
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=_public_ai_error_detail(exc, surface="assistant"),
+        ) from exc
+
+    response_json = {}
+    if questions:
+        response_json["questions"] = questions
+    if write_intent:
+        response_json["write_intent"] = write_intent.dict()
+    response_json["provider"] = "openai"
+    response_json["model"] = model_name
+    if usage:
+        response_json["usage"] = usage.dict(exclude_none=True)
+
+    _append_chat_message(
+        db,
+        household_id,
+        "assistant",
+        answer,
+        message_type="assistant_response",
+        content_json=response_json if response_json else None,
+        thread=thread,
+    )
 
     return {
         "household_id": household_id,
         "prompt": request_body.prompt,
         "answer": answer,
+        "questions": questions,
+        "write_intent": write_intent.dict() if write_intent else None,
         "provider": "openai",
         "model": model_name,
         "usage": usage,
     }
+
+@app.post("/households/{household_id}/assistant/apply_intent")
+def household_assistant_apply_intent(
+    household_id: int,
+    request: Request,
+    request_body: schemas.AssistantIntentApplyRequest,
+    db: Session = Depends(get_db),
+):
+    ensure_household_exists(db, household_id, request)
+    normalized_data = _normalize_assistant_apply_data(request_body)
+    _validate_apply_intent_against_source_message(db, household_id, request_body, normalized_data)
+
+    if request_body.intent == "create_expense":
+        return _process_create_expense(db, household_id, normalized_data, request_body.source_message_id, request_body.intent)
+    elif request_body.intent == "create_planned_purchase":
+        return _process_create_planned_purchase(db, household_id, normalized_data, request_body.source_message_id, request_body.intent)
+    elif request_body.intent == "create_income":
+        return _process_create_income(db, household_id, normalized_data, request_body.source_message_id, request_body.intent)
+    elif request_body.intent == "create_subscription":
+        return _process_create_subscription(db, household_id, normalized_data, request_body.source_message_id, request_body.intent)
+    elif request_body.intent == "delete_entity":
+        return _process_delete_entity(db, household_id, normalized_data, request_body.source_message_id, request_body.intent)
+    elif request_body.intent == "update_entity":
+        return _process_update_entity(db, household_id, normalized_data, request_body.source_message_id, request_body.intent)
+    else:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Okänt intent: {request_body.intent}")
+
+
+def _normalize_assistant_apply_data(request_body: schemas.AssistantIntentApplyRequest) -> dict[str, Any]:
+    data = dict(request_body.data)
+    if request_body.intent == "update_entity":
+        entity_type = request_body.target_entity_type or data.get("entity_type")
+        entity_id = data.get("entity_id", data.get("id"))
+        updates = data.get("updates")
+        if updates is None:
+            updates = {key: value for key, value in data.items() if key not in {"id", "entity_id", "entity_type"}}
+        return {
+            "entity_type": entity_type,
+            "entity_id": entity_id,
+            "updates": updates,
+        }
+    if request_body.intent == "delete_entity":
+        return {
+            "entity_type": request_body.target_entity_type or data.get("entity_type"),
+            "entity_id": data.get("entity_id", data.get("id")),
+        }
+    return data
+
+
+def _validate_apply_intent_against_source_message(
+    db: Session,
+    household_id: int,
+    request_body: schemas.AssistantIntentApplyRequest,
+    normalized_data: dict[str, Any],
+) -> None:
+    if request_body.source_message_id is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Apply kräver source_message_id från ett sparat assistantsvar.",
+        )
+    source_message = (
+        db.query(models.ChatMessage)
+        .join(models.ChatThread, models.ChatMessage.thread_id == models.ChatThread.id)
+        .filter(
+            models.ChatMessage.id == request_body.source_message_id,
+            models.ChatMessage.role == "assistant",
+            models.ChatMessage.message_type == "assistant_response",
+            models.ChatThread.household_id == household_id,
+        )
+        .first()
+    )
+    if source_message is None:
+        raise HTTPException(status_code=404, detail="Kunde inte hitta källmeddelandet för apply.")
+    stored_intent = (source_message.content_json or {}).get("write_intent")
+    if not stored_intent:
+        raise HTTPException(status_code=409, detail="Källmeddelandet saknar sparat write_intent.")
+    if stored_intent.get("missing_fields"):
+        raise HTTPException(status_code=409, detail="Write-intent saknar fortfarande obligatoriska fält.")
+    already_applied = (
+        db.query(models.ChatMessage.id)
+        .filter(
+            models.ChatMessage.thread_id == source_message.thread_id,
+            models.ChatMessage.role == "system",
+            models.ChatMessage.message_type == "system_confirmation",
+            models.ChatMessage.content_json["source_message_id"].as_integer() == request_body.source_message_id,
+        )
+        .first()
+    )
+    if already_applied:
+        raise HTTPException(status_code=409, detail="Write-intent har redan applicerats.")
+    if stored_intent.get("intent") != request_body.intent:
+        raise HTTPException(status_code=409, detail="Apply-intent matchar inte intent i källmeddelandet.")
+    stored_target = stored_intent.get("target_entity_type")
+    requested_target = request_body.target_entity_type or normalized_data.get("entity_type")
+    if stored_target and requested_target and stored_target != requested_target:
+        raise HTTPException(status_code=409, detail="Apply-intent matchar inte målentiteten i källmeddelandet.")
+    stored_data = _normalize_intent_data_for_compare(request_body.intent, stored_intent.get("data") or {})
+    requested_data = _normalize_intent_data_for_compare(request_body.intent, normalized_data)
+    if stored_data != requested_data:
+        raise HTTPException(status_code=409, detail="Apply-intentens data har ändrats efter assistantsvaret.")
+
+
+def _normalize_intent_data_for_compare(intent: str, data: dict[str, Any]) -> dict[str, Any]:
+    if intent == "update_entity":
+        updates = dict(data.get("updates") or {})
+        return {
+            "entity_type": data.get("entity_type"),
+            "entity_id": data.get("entity_id") or data.get("id"),
+            "updates": updates,
+        }
+    if intent == "delete_entity":
+        return {
+            "entity_type": data.get("entity_type"),
+            "entity_id": data.get("entity_id") or data.get("id"),
+        }
+    return dict(data)
+
+
+def _get_model_class_for_entity(entity_type: str):
+    return {
+        "income_source": models.IncomeSource,
+        "loan": models.Loan,
+        "recurring_cost": models.RecurringCost,
+        "subscription_contract": models.SubscriptionContract,
+        "planned_purchase": models.PlannedPurchase,
+        "insurance_policy": models.InsurancePolicy,
+        "vehicle": models.Vehicle,
+        "asset": models.Asset,
+        "housing_scenario": models.HousingScenario,
+        "scenario": models.Scenario,
+        "report_snapshot": models.ReportSnapshot,
+        "person": models.Person,
+    }.get(entity_type)
+
+
+def _has_value(data: dict[str, Any], *keys: str) -> bool:
+    for key in keys:
+        value = data.get(key)
+        if value is not None and value != "":
+            return True
+    return False
+
+
+def _require_assistant_fields(data: dict[str, Any], fields: list[tuple[str, ...]], *, intent: str) -> None:
+    missing = ["/".join(keys) for keys in fields if not _has_value(data, *keys)]
+    if missing:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Write-intent {intent} saknar obligatoriska fält: {', '.join(missing)}.",
+        )
+
+def _save_system_confirmation(
+    db: Session,
+    household_id: int,
+    message: str,
+    *,
+    source_message_id: int | None = None,
+    intent: str | None = None,
+    result: dict[str, Any] | None = None,
+):
+    content_json: dict[str, Any] = {"applied": True}
+    if source_message_id is not None:
+        content_json["source_message_id"] = source_message_id
+    if intent:
+        content_json["intent"] = intent
+    if result:
+        content_json["result"] = result
+    _append_chat_message(
+        db,
+        household_id,
+        "system",
+        message,
+        message_type="system_confirmation",
+        content_json=content_json,
+    )
+
+
+def _first_person_id_for_household(db: Session, household_id: int) -> int:
+    person = db.query(models.Person).filter_by(household_id=household_id).order_by(models.Person.id.asc()).first()
+    if person is None:
+        raise HTTPException(status_code=400, detail="Hushållet saknar person att koppla inkomsten till.")
+    return int(person.id)
+
+
+def _validated_create_expense_payload(household_id: int, data: dict[str, Any]) -> schemas.RecurringCostCreate:
+    _require_assistant_fields(data, [("category",), ("amount",), ("frequency",)], intent="create_expense")
+    payload = {
+        "household_id": household_id,
+        "person_id": data.get("person_id"),
+        "category": data.get("category") or "other",
+        "subcategory": data.get("subcategory"),
+        "amount": float(data.get("amount", 0) or 0.0),
+        "frequency": data.get("frequency") or "monthly",
+        "mandatory": data.get("mandatory", True),
+        "variability_class": data.get("variability_class") or "fixed",
+        "controllability": data.get("controllability") or "locked",
+        "vendor": data.get("vendor"),
+        "payment_method": data.get("payment_method"),
+        "due_day": data.get("due_day"),
+        "start_date": data.get("start_date"),
+        "end_date": data.get("end_date"),
+        "status": data.get("status") or "active",
+        "note": data.get("note"),
+    }
+    return schemas.RecurringCostCreate(**payload)
+
+
+def _validated_create_income_payload(db: Session, household_id: int, data: dict[str, Any]) -> schemas.IncomeSourceCreate:
+    _require_assistant_fields(data, [("person_id",), ("amount", "net_amount", "gross_amount"), ("frequency",)], intent="create_income")
+    person_id = data.get("person_id")
+    person = db.get(models.Person, person_id)
+    if person is None or person.household_id != household_id:
+        raise HTTPException(status_code=400, detail="Ogiltig person för income_source.")
+    payload = {
+        "person_id": person_id,
+        "type": data.get("type") or "salary",
+        "gross_amount": data.get("gross_amount"),
+        "net_amount": float(data.get("amount", data.get("net_amount", 0)) or 0.0),
+        "frequency": data.get("frequency") or "monthly",
+        "regularity": data.get("regularity") or "fixed",
+        "source": data.get("source") or "Inkomst",
+        "start_date": data.get("start_date"),
+        "end_date": data.get("end_date"),
+        "verified": data.get("verified", False),
+        "verification_doc_id": data.get("verification_doc_id"),
+        "note": data.get("note"),
+    }
+    return schemas.IncomeSourceCreate(**payload)
+
+
+def _validated_create_subscription_payload(household_id: int, data: dict[str, Any]) -> schemas.SubscriptionContractCreate:
+    _require_assistant_fields(
+        data,
+        [("provider",), ("amount", "current_monthly_cost"), ("frequency", "billing_frequency")],
+        intent="create_subscription",
+    )
+    payload = {
+        "household_id": household_id,
+        "person_id": data.get("person_id"),
+        "category": data.get("category") or "other",
+        "provider": data.get("provider") or "Abonnemang",
+        "product_name": data.get("product_name"),
+        "contract_type": data.get("contract_type") or "subscription",
+        "current_monthly_cost": float(data.get("amount", data.get("current_monthly_cost", 0)) or 0.0),
+        "promotional_cost": data.get("promotional_cost"),
+        "promotional_end_date": data.get("promotional_end_date"),
+        "ordinary_cost": data.get("ordinary_cost"),
+        "billing_frequency": data.get("frequency", data.get("billing_frequency")) or "monthly",
+        "binding_start_date": data.get("binding_start_date"),
+        "binding_end_date": data.get("binding_end_date"),
+        "notice_period_days": data.get("notice_period_days"),
+        "auto_renew": data.get("auto_renew", True),
+        "cancellation_method": data.get("cancellation_method"),
+        "cancellation_url": data.get("cancellation_url"),
+        "service_address": data.get("service_address"),
+        "usage_metric_type": data.get("usage_metric_type"),
+        "usage_metric_estimate": data.get("usage_metric_estimate"),
+        "included_allowance": data.get("included_allowance"),
+        "overage_risk": data.get("overage_risk"),
+        "bundling_flag": data.get("bundling_flag", False),
+        "household_criticality": data.get("household_criticality", "optional"),
+        "market_checkable": data.get("market_checkable", True),
+        "last_negotiated_at": data.get("last_negotiated_at"),
+        "next_review_at": data.get("next_review_at"),
+        "latest_invoice_doc_id": data.get("latest_invoice_doc_id"),
+        "status": data.get("status") or "active",
+        "note": data.get("note"),
+    }
+    return schemas.SubscriptionContractCreate(**payload)
+
+
+def _validated_create_planned_purchase_payload(data: dict[str, Any]) -> analysis_schemas.PlannedPurchaseItem:
+    _require_assistant_fields(data, [("title", "description"), ("amount", "estimated_amount")], intent="create_planned_purchase")
+    payload = {
+        "id": data.get("id"),
+        "title": data.get("title") or data.get("description") or "Nytt köp",
+        "category": data.get("category"),
+        "estimated_amount": float(data.get("amount", data.get("estimated_amount", 0)) or 0.0),
+        "priority": data.get("priority") or "optional",
+        "due_window": data.get("due_window"),
+        "status": data.get("status") or "planned",
+    }
+    return analysis_schemas.PlannedPurchaseItem(**payload)
+
+
+def _load_entity_for_household(db: Session, model_class, entity_id: int, household_id: int):
+    if model_class is models.IncomeSource:
+        return (
+            db.query(models.IncomeSource)
+            .join(models.Person, models.IncomeSource.person_id == models.Person.id)
+            .filter(models.IncomeSource.id == entity_id, models.Person.household_id == household_id)
+            .first()
+        )
+    return (
+        db.query(model_class)
+        .filter(model_class.id == entity_id, model_class.household_id == household_id)
+        .first()
+    )
+
+
+def _validated_update_payload(entity_type: str, obj, updates: dict[str, Any]) -> dict[str, Any]:
+    if entity_type == "recurring_cost":
+        payload = schemas.RecurringCostUpdate(**updates)
+        return payload.dict(exclude_unset=True, exclude_none=True)
+    if entity_type == "subscription_contract":
+        payload = schemas.SubscriptionContractUpdate(**updates)
+        return payload.dict(exclude_unset=True, exclude_none=True)
+    if entity_type == "income_source":
+        payload = schemas.IncomeSourceUpdate(**updates)
+        return payload.dict(exclude_unset=True, exclude_none=True)
+    if entity_type == "planned_purchase":
+        allowed = {"title", "category", "estimated_amount", "amount", "priority", "due_window", "status", "note", "person_id"}
+        normalized = {key: value for key, value in updates.items() if key in allowed}
+        if "amount" in normalized and "estimated_amount" not in normalized:
+            normalized["estimated_amount"] = normalized.pop("amount")
+        return normalized
+    allowed_keys = {key for key in updates.keys() if hasattr(obj, key)}
+    return {key: updates[key] for key in allowed_keys}
+
+def _process_create_expense(
+    db: Session,
+    household_id: int,
+    data: dict[str, Any],
+    source_message_id: int | None = None,
+    intent: str | None = None,
+):
+    try:
+        payload = _validated_create_expense_payload(household_id, data)
+        cost = models.RecurringCost(**payload.dict(exclude_none=True))
+        db.add(cost)
+        db.commit()
+        db.refresh(cost)
+
+        _save_system_confirmation(
+            db,
+            household_id,
+            f"Sparade ny utgift för **{cost.vendor or cost.category}** på **{cost.amount} kr** ({cost.frequency}).",
+            source_message_id=source_message_id,
+            intent=intent,
+            result={"entity_type": "recurring_cost", "entity_id": cost.id},
+        )
+
+        return {"status": "success", "entity_type": "recurring_cost", "entity_id": cost.id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+def _process_create_income(
+    db: Session,
+    household_id: int,
+    data: dict[str, Any],
+    source_message_id: int | None = None,
+    intent: str | None = None,
+):
+    try:
+        payload = _validated_create_income_payload(db, household_id, data)
+        inc = models.IncomeSource(**payload.dict(exclude_none=True))
+        db.add(inc)
+        db.commit()
+        db.refresh(inc)
+
+        _save_system_confirmation(
+            db,
+            household_id,
+            f"Sparade ny inkomst från **{inc.source or 'Inkomst'}** på **{inc.net_amount or inc.gross_amount or 0} kr**.",
+            source_message_id=source_message_id,
+            intent=intent,
+            result={"entity_type": "income_source", "entity_id": inc.id},
+        )
+
+        return {"status": "success", "entity_type": "income_source", "entity_id": inc.id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+def _process_create_subscription(
+    db: Session,
+    household_id: int,
+    data: dict[str, Any],
+    source_message_id: int | None = None,
+    intent: str | None = None,
+):
+    try:
+        payload = _validated_create_subscription_payload(household_id, data)
+        sub = models.SubscriptionContract(**payload.dict(exclude_none=True))
+        db.add(sub)
+        db.commit()
+        db.refresh(sub)
+
+        _save_system_confirmation(
+            db,
+            household_id,
+            f"Lade till abonnemang från **{sub.provider}** på **{sub.current_monthly_cost} kr**.",
+            source_message_id=source_message_id,
+            intent=intent,
+            result={"entity_type": "subscription_contract", "entity_id": sub.id},
+        )
+        return {"status": "success", "entity_type": "subscription_contract", "entity_id": sub.id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+def _process_create_planned_purchase(
+    db: Session,
+    household_id: int,
+    data: dict[str, Any],
+    source_message_id: int | None = None,
+    intent: str | None = None,
+):
+    try:
+        payload = _validated_create_planned_purchase_payload(data)
+        purch = models.PlannedPurchase(
+            household_id=household_id,
+            title=payload.title,
+            category=payload.category,
+            estimated_amount=payload.estimated_amount,
+            priority=payload.priority,
+            due_window=payload.due_window,
+            status=payload.status,
+        )
+        db.add(purch)
+        db.commit()
+        db.refresh(purch)
+        _save_system_confirmation(
+            db,
+            household_id,
+            f"Sparade ett planerat köp: **{purch.title}** ({purch.estimated_amount} kr).",
+            source_message_id=source_message_id,
+            intent=intent,
+            result={"entity_type": "planned_purchase", "entity_id": purch.id},
+        )
+        return {"status": "success", "entity_type": "planned_purchase", "entity_id": purch.id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+def _process_update_entity(
+    db: Session,
+    household_id: int,
+    data: dict[str, Any],
+    source_message_id: int | None = None,
+    intent: str | None = None,
+):
+    entity_type = data.get("entity_type")
+    entity_id = data.get("entity_id")
+    updates = data.get("updates", {})
+    if not entity_type or not entity_id or not updates:
+        raise HTTPException(status_code=400, detail="Saknar entity_type, entity_id eller updates för update_entity")
+
+    model_class = _get_model_class_for_entity(entity_type)
+    if not model_class:
+        raise HTTPException(status_code=400, detail=f"Ogiltig entity_type för uppdatering: {entity_type}")
+
+    obj = _load_entity_for_household(db, model_class, entity_id, household_id)
+    if not obj:
+        raise HTTPException(status_code=404, detail="Kunde inte hitta objektet som skulle uppdateras")
+
+    validated_updates = _validated_update_payload(entity_type, obj, updates)
+    updated_fields = []
+    for k, v in validated_updates.items():
+        if k in {"id", "household_id"}:
+            continue
+        if hasattr(obj, k):
+            setattr(obj, k, v)
+            updated_fields.append(f"{k} -> {v}")
+
+    db.add(obj)
+    db.commit()
+
+    _save_system_confirmation(
+        db,
+        household_id,
+        f"Uppdaterade **{entity_type}** (ID {entity_id}). Fält i ändring: {', '.join(updated_fields)}",
+        source_message_id=source_message_id,
+        intent=intent,
+        result={"entity_type": entity_type, "entity_id": entity_id},
+    )
+    return {"status": "success", "entity_type": entity_type, "entity_id": entity_id}
+
+def _process_delete_entity(
+    db: Session,
+    household_id: int,
+    data: dict[str, Any],
+    source_message_id: int | None = None,
+    intent: str | None = None,
+):
+    entity_type = data.get("entity_type")
+    entity_id = data.get("entity_id")
+    if not entity_type or not entity_id:
+        raise HTTPException(status_code=400, detail="Saknar entity_type eller entity_id för delete_entity")
+
+    model_class = _get_model_class_for_entity(entity_type)
+    if not model_class:
+        raise HTTPException(status_code=400, detail=f"Ogiltig entity_type för radering: {entity_type}")
+
+    obj = _load_entity_for_household(db, model_class, entity_id, household_id)
+    if not obj:
+        raise HTTPException(status_code=404, detail="Kunde inte hitta objektet som skulle raderas")
+
+    if entity_type == "planned_purchase":
+        db.delete(obj)
+    elif hasattr(obj, "status"):
+        obj.status = "ended" if entity_type != "loan" else "closed"
+        db.add(obj)
+    elif hasattr(obj, "active"):
+        obj.active = False
+        db.add(obj)
+    else:
+        db.delete(obj)
+
+    db.commit()
+    _save_system_confirmation(
+        db,
+        household_id,
+        f"Tog bort/avslutade **{entity_type}** (ID {entity_id}).",
+        source_message_id=source_message_id,
+        intent=intent,
+        result={"entity_type": entity_type, "entity_id": entity_id},
+    )
+    return {"status": "success", "entity_type": entity_type, "entity_id": entity_id}
 
 
 @app.post(
@@ -2364,10 +3355,11 @@ def household_assistant_respond(
 )
 def household_ingest_ai_analyze(
     household_id: int,
+    request: Request,
     request_body: schemas.IngestAnalyzeRequest,
     db: Session = Depends(get_db),
 ):
-    ensure_household_exists(db, household_id)
+    ensure_household_exists(db, household_id, request)
     try:
         response, _ = ai_services.analyze_ingest_input(
             db,
@@ -2385,7 +3377,10 @@ def household_ingest_ai_analyze(
     except ai_services.AIInputNotSupportedError as exc:
         raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED, detail=str(exc)) from exc
     except ai_services.AIProviderResponseError as exc:
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=_public_ai_error_detail(exc, surface="ingest"),
+        ) from exc
 
 
 @app.post(
@@ -2394,16 +3389,123 @@ def household_ingest_ai_analyze(
 )
 def household_ingest_ai_promote(
     household_id: int,
+    request: Request,
     request_body: schemas.IngestPromoteRequest,
     db: Session = Depends(get_db),
 ):
-    ensure_household_exists(db, household_id)
+    ensure_household_exists(db, household_id, request)
     try:
         return ai_services.promote_ingest_suggestions(db, household_id, request_body)
     except ai_services.AIInputNotSupportedError as exc:
         raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED, detail=str(exc)) from exc
     except ai_services.AIProviderResponseError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+
+@app.get("/households/{household_id}/analysis")
+def get_household_analysis(
+    household_id: int,
+    request: Request,
+    current_balance: Optional[float] = None,
+    as_of: Optional[date] = None,
+    db: Session = Depends(get_db),
+):
+    """Full deterministic analysis of household economics.
+
+    No LLM calls. Same input → same output.
+    Returns: historical, cycle, planned, subscriptions, forecast, actions.
+    """
+    ensure_household_exists(db, household_id, request)
+    return build_analysis_output(db, household_id, current_balance, as_of=as_of)
+
+
+@app.get("/households/{household_id}/analysis/cycle")
+def get_cycle_status(
+    household_id: int,
+    request: Request,
+    current_balance: Optional[float] = None,
+    db: Session = Depends(get_db),
+):
+    """Current payday cycle status. Deterministic."""
+    ensure_household_exists(db, household_id, request)
+    records = calculations.load_household_records(db, household_id)
+    return compute_cycle_status(records, current_balance=current_balance).dict()
+
+
+# --- Planned Purchase CRUD ---
+
+@app.get("/households/{household_id}/planned_purchases")
+def list_planned_purchases(
+    household_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    ensure_household_exists(db, household_id, request)
+    items = db.query(models.PlannedPurchase).filter_by(household_id=household_id).order_by(models.PlannedPurchase.id).all()
+    return [calculations.serialize_model(item) for item in items]
+
+
+@app.post("/households/{household_id}/planned_purchases", status_code=status.HTTP_201_CREATED)
+def create_planned_purchase(
+    household_id: int,
+    request: Request,
+    body: analysis_schemas.PlannedPurchaseItem,
+    db: Session = Depends(get_db),
+):
+    ensure_household_exists(db, household_id, request)
+    item = models.PlannedPurchase(
+        household_id=household_id,
+        title=body.title,
+        category=body.category,
+        estimated_amount=body.estimated_amount,
+        priority=body.priority,
+        due_window=body.due_window,
+        status=body.status,
+    )
+    db.add(item)
+    db.commit()
+    db.refresh(item)
+    return calculations.serialize_model(item)
+
+
+@app.put("/households/{household_id}/planned_purchases/{purchase_id}")
+def update_planned_purchase(
+    household_id: int,
+    purchase_id: int,
+    request: Request,
+    body: analysis_schemas.PlannedPurchaseItem,
+    db: Session = Depends(get_db),
+):
+    ensure_household_exists(db, household_id, request)
+    item = db.query(models.PlannedPurchase).filter_by(id=purchase_id, household_id=household_id).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="Köp hittades inte.")
+    item.title = body.title
+    item.category = body.category
+    item.estimated_amount = body.estimated_amount
+    item.priority = body.priority
+    item.due_window = body.due_window
+    item.status = body.status
+    db.commit()
+    db.refresh(item)
+    return calculations.serialize_model(item)
+
+
+@app.delete("/households/{household_id}/planned_purchases/{purchase_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_planned_purchase(
+    household_id: int,
+    purchase_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    ensure_household_exists(db, household_id, request)
+    item = db.query(models.PlannedPurchase).filter_by(id=purchase_id, household_id=household_id).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="Köp hittades inte.")
+    db.delete(item)
+    db.commit()
+    return
 
 
 @app.get("/{frontend_path:path}", include_in_schema=False)

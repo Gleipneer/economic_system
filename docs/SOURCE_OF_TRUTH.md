@@ -129,3 +129,11 @@ kanonisk data.
 - `POST /households/{id}/assistant/apply_intent` kräver `source_message_id` till ett sparat assistantsvar och jämför intent/data mot det lagrade förslaget före skrivning. Samma `source_message_id` kan inte appliceras igen.
 - Apply-bekräftelser lagras som separata systemmeddelanden i samma tråd.
 - Chatthistorik är en UX-/audityta och är inte samma sak som kanonisk ekonomisk sanning eller analysens sanningslager.
+
+## Assistant UX status 2026-04-27
+
+- Assistantkort renderas nu som tydliga ändringskort med status, sammanfattning och fältförändringar.
+- Applybar intent visar CTA **Godkänn och spara**; intent med `missing_fields`/frågor visar blockerat informationsläge.
+- Mobil (`<=768px`) kör single-column chat med kollapsat ekonomiläge via toggle-knapp, sticky composer och extra bottenpadding/safe-area för att undvika överlapp.
+- Desktop behåller tvåkolumnslayout men använder samma action-cards och apply-logik.
+- Kontextbudget i assistant-tråd är stramad: färre meddelanden och kortare historikinnehåll skickas till modellen för att minska tokenbelastning.
