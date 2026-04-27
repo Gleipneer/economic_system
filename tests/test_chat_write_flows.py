@@ -343,6 +343,91 @@ def test_apply_update_entity(tmp_path):
         assert cost.amount == 200.0
         db.close()
 
+
+def test_apply_update_entity_resolves_single_match(tmp_path):
+    app, db = load_app(tmp_path)
+    from app import models
+    with TestClient(app) as client:
+        hid = create_local_household(client)
+        cost = models.RecurringCost(
+            household_id=hid,
+            category="boende",
+            vendor="Hyra",
+            amount=12500.0,
+            frequency="monthly",
+            status="active",
+        )
+        db.add(cost)
+        db.commit()
+        source_message = create_source_message(
+            db,
+            client,
+            hid,
+            "update_entity",
+            {
+                "match": {"category": "boende", "status": "active"},
+                "updates": {"monthly_amount": 10000.0},
+            },
+            "recurring_cost",
+        )
+        resp = client.post(
+            f"/households/{hid}/assistant/apply_intent",
+            json={"source_message_id": source_message.id},
+        )
+        assert resp.status_code == 200
+        db.refresh(cost)
+        assert cost.amount == 10000.0
+        db.close()
+
+
+def test_apply_update_entity_match_ambiguous_is_blocked(tmp_path):
+    app, db = load_app(tmp_path)
+    from app import models
+    with TestClient(app) as client:
+        hid = create_local_household(client)
+        db.add(models.RecurringCost(household_id=hid, category="boende", vendor="Hyra A", amount=12000.0, frequency="monthly", status="active"))
+        db.add(models.RecurringCost(household_id=hid, category="boende", vendor="Hyra B", amount=12500.0, frequency="monthly", status="active"))
+        db.commit()
+        source_message = create_source_message(
+            db,
+            client,
+            hid,
+            "update_entity",
+            {
+                "match": {"category": "boende", "status": "active"},
+                "updates": {"monthly_amount": 10000.0},
+            },
+            "recurring_cost",
+        )
+        resp = client.post(
+            f"/households/{hid}/assistant/apply_intent",
+            json={"source_message_id": source_message.id},
+        )
+        assert resp.status_code == 409
+        assert "flera entiteter" in resp.json()["detail"]
+        db.close()
+
+
+def test_apply_update_entity_missing_fields_still_blocked(tmp_path):
+    app, db = load_app(tmp_path)
+    with TestClient(app) as client:
+        hid = create_local_household(client)
+        source_message = create_source_message(
+            db,
+            client,
+            hid,
+            "update_entity",
+            {"match": {"category": "boende"}},
+            "recurring_cost",
+        )
+        resp = client.post(
+            f"/households/{hid}/assistant/apply_intent",
+            json={"source_message_id": source_message.id},
+        )
+        assert resp.status_code == 400
+        assert "saknar updates" in resp.json()["detail"].lower()
+        db.close()
+
 def test_apply_delete_entity(tmp_path):
     app, db = load_app(tmp_path)
     from app import models

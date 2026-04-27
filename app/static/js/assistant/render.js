@@ -23,6 +23,14 @@ export function createAssistantRenderer({
     return String(value);
   }
 
+  function formatCurrencyMaybe(value) {
+    const numeric = Number(value);
+    if (Number.isFinite(numeric)) {
+      return `${new Intl.NumberFormat("sv-SE", { maximumFractionDigits: 0 }).format(numeric)} kr`;
+    }
+    return formatIntentValue(value);
+  }
+
   function formatIntentLabel(key) {
     return {
       monthly_amount: "Månadsbelopp",
@@ -61,6 +69,36 @@ export function createAssistantRenderer({
       changes.push("<li><span>Detaljer</span><strong>Inga fält specificerade</strong></li>");
     }
     return `<ul class="intent-change-list">${changes.join("")}</ul>`;
+  }
+
+  function summarizeEntityLabel(writeIntent) {
+    const data = writeIntent.data || {};
+    if (writeIntent.target_entity_type === "recurring_cost") {
+      const category = String(data.match?.category || data.category || "").toLowerCase();
+      if (category === "boende" || category === "housing") return "Boende";
+      return "Återkommande kostnad";
+    }
+    if (writeIntent.target_entity_type === "loan") return "Lån";
+    if (writeIntent.target_entity_type === "subscription_contract") return "Abonnemang";
+    return writeIntent.target_entity_type || "Ekonomipost";
+  }
+
+  function renderIntentHumanDiff(writeIntent) {
+    const data = writeIntent.data || {};
+    if (writeIntent.intent !== "update_entity" || !data.updates || typeof data.updates !== "object") {
+      return "";
+    }
+    const rows = Object.entries(data.updates).map(([key, nextValue]) => {
+      const previous = data.previous_values && typeof data.previous_values === "object" ? data.previous_values[key] : undefined;
+      const previousLabel = ["amount", "monthly_amount", "monthly_payment", "current_balance", "monthly_admin_fee"].includes(key)
+        ? formatCurrencyMaybe(previous)
+        : formatIntentValue(previous);
+      const nextLabel = ["amount", "monthly_amount", "monthly_payment", "current_balance", "monthly_admin_fee"].includes(key)
+        ? formatCurrencyMaybe(nextValue)
+        : formatIntentValue(nextValue);
+      return `<li><span>${escapeHtml(formatIntentLabel(key))}</span><strong>${escapeHtml(previousLabel)} → ${escapeHtml(nextLabel)}</strong></li>`;
+    });
+    return rows.length ? `<ul class="intent-diff-list">${rows.join("")}</ul>` : "";
   }
 
   function renderAssistantDeterministicOverview() {
@@ -200,8 +238,9 @@ export function createAssistantRenderer({
             <strong>Föreslagen ändring</strong>
             <span class="intent-status-pill ${canApply || isApplied ? "ready" : "blocked"}">${isApplied ? "Sparad" : hasMissingFields || hasOpenQuestions ? "Behöver mer information" : hasUnsupportedBatch ? "Batch kräver manuell delning" : "Kräver godkännande"}</span>
           </div>
-          <p class="intent-summary">${escapeHtml(summarizeIntentAction(wi.intent))}${wi.target_entity_type ? ` · ${escapeHtml(wi.target_entity_type)}` : ""}</p>
-          ${renderIntentFieldChanges(wi)}
+          <p class="intent-summary">${escapeHtml(summarizeEntityLabel(wi))}</p>
+          ${renderIntentHumanDiff(wi) || renderIntentFieldChanges(wi)}
+          ${wi.intent === "update_entity" ? `<p class="intent-description">Den matchade posten uppdateras deterministiskt när du godkänner.</p>` : ""}
           ${hasMissingFields ? `<p class="error-text subtle"><em>Behöver mer information: ${escapeHtml(wi.missing_fields.join(", "))}</em></p>` : ""}
           ${hasOpenQuestions ? `<p class="error-text subtle"><em>Besvara frågorna innan åtgärden kan sparas.</em></p>` : ""}
           ${hasUnsupportedBatch ? `<p class="error-text subtle"><em>Flera uppdateringar i samma write_intent stöds inte för apply ännu.</em></p>` : ""}
@@ -211,7 +250,7 @@ export function createAssistantRenderer({
             ${!isApplied && hasPersistedMessageId ? `<button type="button" class="ghost" data-action="dismiss-assistant-intent" data-message-id="${message.id}">Avvisa</button>` : ""}
           </div>
           <details class="intent-json-details">
-            <summary>Visa teknisk JSON</summary>
+            <summary>Visa teknisk information</summary>
             <pre class="intent-data">${escapeHtml(JSON.stringify(wi.data || {}, null, 2))}</pre>
           </details>
         </div>

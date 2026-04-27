@@ -8,6 +8,20 @@ export function createAssistantWorkspace({
   selectedHousehold,
   refreshAllData,
 }) {
+  function friendlyApplyError(error) {
+    const text = String(readError(error) || "");
+    if (text.includes("Saknar entity_type, entity_id eller updates")) {
+      return "Ändringen saknar tillräcklig information för att kunna sparas.";
+    }
+    if (text.includes("matchar flera entiteter")) {
+      return "Förslaget matchar flera poster. Välj en mer specifik ändring.";
+    }
+    if (text.includes("redan applicerats")) {
+      return "Den här ändringen är redan sparad.";
+    }
+    return text;
+  }
+
   function scheduleAssistantScrollToBottom() {
     requestAnimationFrame(() => {
       const log = document.querySelector(".chat-log:not(.hidden)");
@@ -68,6 +82,7 @@ export function createAssistantWorkspace({
       if (state.selectedHouseholdId !== householdId) return;
       state.ui.assistantMessages = mapAssistantThreadMessages(thread.messages || []);
       updateAssistantLogBottomOffset();
+      scheduleAssistantScrollToBottom();
     } catch (error) {
       if (state.selectedHouseholdId === householdId) {
         showToast(readError(error), "error");
@@ -138,7 +153,7 @@ export function createAssistantWorkspace({
     } catch (error) {
       msg.intent_applied = false;
       msg.intent_apply_loading = false;
-      showToast(`Kunde inte spara: ${readError(error)}`, "error");
+      showToast(`Kunde inte spara: ${friendlyApplyError(error)}`, "error");
       render();
     } finally {
       msg.intent_apply_loading = false;

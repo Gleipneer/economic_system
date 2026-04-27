@@ -2857,15 +2857,31 @@ def household_assistant_apply_intent(
 def _normalize_assistant_apply_data(request_body: schemas.AssistantIntentApplyRequest) -> dict[str, Any]:
     data = dict(request_body.data or {})
     if request_body.intent == "update_entity":
-        entity_type = request_body.target_entity_type or data.get("entity_type")
+        entity_type = request_body.target_entity_type or data.get("entity_type") or data.get("target_entity_type")
         entity_id = data.get("entity_id", data.get("id"))
         updates = data.get("updates")
+        proposed_updates = data.get("proposed_updates")
+        if updates is None and isinstance(proposed_updates, list) and len(proposed_updates) == 1 and isinstance(proposed_updates[0], dict):
+            proposed = proposed_updates[0]
+            entity_type = entity_type or proposed.get("entity_type")
+            entity_id = entity_id or proposed.get("entity_id") or proposed.get("id")
+            updates = proposed.get("updates")
         if updates is None:
-            updates = {key: value for key, value in data.items() if key not in {"id", "entity_id", "entity_type"}}
+            updates = {
+                key: value
+                for key, value in data.items()
+                if key not in {"id", "entity_id", "entity_type", "target_entity_type", "match", "proposed_updates", "previous_values", "summary", "description", "label"}
+            }
+        if entity_type == "recurring_cost" and isinstance(updates, dict) and "monthly_amount" in updates and "amount" not in updates:
+            updates["amount"] = updates.pop("monthly_amount")
+        if entity_type == "loan" and isinstance(updates, dict) and "monthly_payment" in updates and "required_monthly_payment" not in updates:
+            updates["required_monthly_payment"] = updates.pop("monthly_payment")
         return {
             "entity_type": entity_type,
             "entity_id": entity_id,
+            "match": data.get("match"),
             "updates": updates,
+            "previous_values": data.get("previous_values", {}),
         }
     if request_body.intent == "delete_entity":
         return {
@@ -2917,7 +2933,89 @@ def _resolve_apply_request_from_source(
         if _normalize_intent_data_for_compare(stored_intent, stored_data) != _normalize_intent_data_for_compare(stored_intent, requested_data):
             raise HTTPException(status_code=409, detail="Apply-intentens data har ändrats efter assistantsvaret.")
 
+    if stored_intent == "update_entity":
+        stored_data = _resolve_update_entity_reference(db, household_id, stored_data, stored_target)
+
     return stored_intent, stored_target, stored_data
+
+
+def _normalize_housing_category(category: str | None) -> str | None:
+    if category is None:
+        return None
+    normalized = str(category).strip().lower()
+    if normalized == "housing":
+        return "boende"
+    return normalized or None
+
+
+def _resolve_update_entity_reference(
+    db: Session,
+    household_id: int,
+    data: dict[str, Any],
+    fallback_target_entity_type: str | None,
+) -> dict[str, Any]:
+    entity_type = (data.get("entity_type") or fallback_target_entity_type or "").strip()
+    entity_id = data.get("entity_id")
+    updates = data.get("updates")
+    match = data.get("match") if isinstance(data.get("match"), dict) else {}
+    if not entity_type:
+        raise HTTPException(status_code=400, detail="Update-intent saknar entity_type.")
+    if not isinstance(updates, dict) or not updates:
+        raise HTTPException(status_code=400, detail="Update-intent saknar updates.")
+
+    if entity_id is None and match:
+        entity_id = match.get("entity_id") or match.get("id")
+    if entity_id is not None:
+        return {"entity_type": entity_type, "entity_id": int(entity_id), "updates": updates}
+
+    model_class = _get_model_class_for_entity(entity_type)
+    if not model_class:
+        raise HTTPException(status_code=400, detail=f"Ogiltig entity_type för uppdatering: {entity_type}")
+
+    if entity_type == "recurring_cost":
+        query = db.query(models.RecurringCost).filter(models.RecurringCost.household_id == household_id)
+        category = _normalize_housing_category(match.get("category"))
+        if category:
+            query = query.filter(models.RecurringCost.category.ilike(category))
+        vendor = match.get("vendor")
+        if vendor:
+            query = query.filter(models.RecurringCost.vendor.ilike(str(vendor)))
+        status = match.get("status")
+        if status:
+            query = query.filter(models.RecurringCost.status == status)
+        candidates = query.order_by(models.RecurringCost.id.asc()).all()
+    elif entity_type == "loan":
+        query = db.query(models.Loan).filter(models.Loan.household_id == household_id)
+        lender = match.get("lender")
+        if lender:
+            query = query.filter(models.Loan.lender.ilike(str(lender)))
+        purpose = match.get("purpose")
+        if purpose:
+            query = query.filter(models.Loan.purpose.ilike(str(purpose)))
+        status = match.get("status")
+        if status:
+            query = query.filter(models.Loan.status == status)
+        candidates = query.order_by(models.Loan.id.asc()).all()
+    elif entity_type == "subscription_contract":
+        query = db.query(models.SubscriptionContract).filter(models.SubscriptionContract.household_id == household_id)
+        provider = match.get("provider")
+        if provider:
+            query = query.filter(models.SubscriptionContract.provider.ilike(str(provider)))
+        category = match.get("category")
+        if category:
+            query = query.filter(models.SubscriptionContract.category == category)
+        status = match.get("status")
+        if status:
+            query = query.filter(models.SubscriptionContract.status == status)
+        candidates = query.order_by(models.SubscriptionContract.id.asc()).all()
+    else:
+        raise HTTPException(status_code=400, detail="Update-intent kräver entity_id för denna entity_type.")
+
+    if len(candidates) == 0:
+        raise HTTPException(status_code=409, detail="Update-intent kunde inte matcha någon entitet för apply.")
+    if len(candidates) > 1:
+        raise HTTPException(status_code=409, detail="Update-intent matchar flera entiteter. Specificera exakt post innan apply.")
+    return {"entity_type": entity_type, "entity_id": int(candidates[0].id), "updates": updates}
 
 
 def _validate_source_message_for_apply(
@@ -2979,6 +3077,7 @@ def _normalize_intent_data_for_compare(intent: str, data: dict[str, Any]) -> dic
         return {
             "entity_type": data.get("entity_type"),
             "entity_id": data.get("entity_id") or data.get("id"),
+            "match": data.get("match") if isinstance(data.get("match"), dict) else None,
             "updates": updates,
         }
     if intent == "delete_entity":

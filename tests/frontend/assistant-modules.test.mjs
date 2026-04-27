@@ -163,8 +163,8 @@ test("assistant renderer shows apply CTA for complete intent", () => {
   const pageHtml = renderer.renderAssistantPage();
   assert.match(pageHtml, /Godkänn och spara/);
   assert.match(pageHtml, /Kräver godkännande/);
-  assert.match(pageHtml, /Visa teknisk JSON/);
-  assert.match(pageHtml, /Månadsbelopp|Belopp/);
+  assert.match(pageHtml, /Visa teknisk information/);
+  assert.match(pageHtml, /Återkommande kostnad|Boende/);
 });
 
 test("assistant workspace apply posts source_message_id", async () => {
@@ -248,7 +248,44 @@ test("assistant renderer keeps technical json collapsed by default", () => {
   });
   const html = renderer.renderAssistantPage();
   assert.match(html, /<details class="intent-json-details">/);
-  assert.match(html, /Visa teknisk JSON/);
+  assert.match(html, /Visa teknisk information/);
+  assert.match(html, /Månadsbelopp/);
+});
+
+test("assistant renderer hides apply button when missing fields", () => {
+  const state = {
+    ui: {
+      assistantAnalysisLoading: false,
+      assistantAnalysis: null,
+      assistantMessages: [{
+        id: 78,
+        role: "assistant",
+        message_type: "assistant_response",
+        content: "Behöver mer info",
+        questions: [],
+        write_intent: { intent: "create_expense", target_entity_type: "recurring_cost", data: { vendor: "Okänd" }, missing_fields: ["amount"] },
+        provider: "openai",
+        model: "gpt-test",
+        usage: null,
+        content_json: {},
+      }],
+      assistantInput: "",
+      assistantPending: false,
+      assistantThreadLoading: false,
+      assistantMobileSummaryOpen: false,
+      assistantDismissedIntentIds: [],
+    },
+  };
+  const renderer = createAssistantRenderer({
+    state,
+    escapeHtml: (value) => String(value),
+    selectedHousehold: () => ({ id: 1 }),
+    renderPageHeader: (title) => `<header>${title}</header>`,
+    renderAssistantMarkdown: (text) => `<p>${text}</p>`,
+  });
+  const html = renderer.renderAssistantPage();
+  assert.doesNotMatch(html, /data-action="apply-assistant-intent"/);
+  assert.match(html, /Behöver mer information/);
 });
 
 test("navigation controller resolves routes without split assistant ownership", () => {

@@ -1767,7 +1767,30 @@ textarea {
 
 .intent-change-list li span,
 .intent-change-list li strong {
-  overflow-wrap: anywhere;
+  overflow-wrap: break-word;
+}
+
+.intent-diff-list {
+  list-style: none;
+  margin: 0 0 8px;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.intent-diff-list li {
+  display: grid;
+  gap: 2px;
+  border: 1px solid var(--border-soft);
+  border-radius: 12px;
+  padding: 8px 10px;
+  background: rgba(255, 255, 255, 0.92);
+}
+
+.intent-description {
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: 0.9rem;
 }
 
 .intent-json-details {
@@ -1923,7 +1946,8 @@ textarea {
     font-size: 0.95rem;
     line-height: 1.5;
     max-width: 100%;
-    overflow-wrap: anywhere;
+    overflow-wrap: break-word;
+    word-break: normal;
   }
 
   .chat-intent-card,
@@ -1942,5 +1966,15 @@ textarea {
 
   .assistant-meta {
     margin-bottom: 4px;
+  }
+
+  .toast {
+    left: 12px;
+    right: 12px;
+    bottom: calc(12px + env(safe-area-inset-bottom));
+    min-width: 0;
+    width: auto;
+    padding: 12px 14px;
+    font-size: 0.92rem;
   }
 }
