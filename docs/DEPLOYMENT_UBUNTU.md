@@ -1,7 +1,7 @@
 # Deployment på Ubuntu
 
 Steg-för-steg-guide för att köra systemet på en Ubuntu-server.
-Last verified: 2026-04-10.
+Last verified: 2026-04-14.
 
 ## Systemkrav
 
@@ -54,6 +54,11 @@ OPENAI_API_KEY=sk-...
 OPENAI_MODEL=gpt-5.4
 OPENAI_ANALYSIS_MODEL=gpt-5.4-mini
 OPENAI_INGEST_MODEL=gpt-5.4-mini
+ECON_AI_MODEL_ROUTING_ENABLED=true
+ECON_AI_DEFAULT_MODEL=
+ECON_AI_STRUCTURED_MODEL=
+ECON_AI_DEEP_ANALYSIS_MODEL=
+ECON_AI_FALLBACK_MODEL=
 OPENAI_TIMEOUT_SECONDS=45
 ```
 
@@ -103,6 +108,11 @@ För att exponera via Tailscale Funnel (publik access):
 ```bash
 tailscale funnel 8000
 ```
+
+Viktigt:
+- Appen har egen session-baserad auth. Oautentiserade användare ska mötas av inloggningsläget innan någon hushållsdata exponeras.
+- Startscriptet skriver både lokal URL och Tailscale-IP vid start. Verifiera dem efter varje omstart.
+- Funnel är rimligt först när minst en riktig användare finns registrerad och `BYPASS_AUTH` inte används.
 
 ## Reverse proxy (valfritt)
 

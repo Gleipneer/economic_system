@@ -124,6 +124,11 @@ economic_system/
 | `OPENAI_MODEL` | `gpt-5.4` | Fallback-modell |
 | `OPENAI_ANALYSIS_MODEL` | ej satt | Override för assistent |
 | `OPENAI_INGEST_MODEL` | ej satt | Override för ingest |
+| `ECON_AI_MODEL_ROUTING_ENABLED` | `true` | Aktiverar assistant-routingpolicy |
+| `ECON_AI_DEFAULT_MODEL` | ej satt | Modell för vanlig assistant-chat |
+| `ECON_AI_STRUCTURED_MODEL` | ej satt | Modell för structured write-intent/missing-info |
+| `ECON_AI_DEEP_ANALYSIS_MODEL` | ej satt | Modell för explicit djupanalys |
+| `ECON_AI_FALLBACK_MODEL` | ej satt | Modell för plain-text fallback vid structured schemafel |
 | `OPENAI_TIMEOUT_SECONDS` | `45` | AI-timeout |
 
 ## Licens

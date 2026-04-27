@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import hashlib
+import logging
+import re
 from collections import defaultdict
 from datetime import date, datetime
 from pathlib import Path
@@ -22,6 +24,7 @@ DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
 SUPPORTED_INGEST_TARGETS = {"recurring_cost", "subscription_contract", "loan", "income_source"}
 SUPPORTED_INGEST_INPUT_MEDIUMS = {"text", "pdf_text", "uploaded_document", "uploaded_pdf", "image", "bank_paste"}
 INGEST_ANALYSIS_SCHEMA_VERSION = "ingest-analysis-v1"
+logger = logging.getLogger(__name__)
 
 
 class AIProviderUnavailableError(RuntimeError):
@@ -45,7 +48,16 @@ class AssistantWriteIntent(StrictModel):
     intent: Literal["create_expense", "create_income", "create_planned_purchase", "create_subscription", "delete_entity", "update_entity", "none"] = "none"
     target_entity_type: str | None = None
     confidence: confloat(ge=0.0, le=1.0) | None = None
-    data: dict[str, Any] = {}
+    data: dict[str, Any] = Field(default_factory=dict)
+    missing_fields: list[str] = []
+    ambiguities: list[str] = []
+
+
+class AssistantWriteIntentStructured(StrictModel):
+    intent: Literal["create_expense", "create_income", "create_planned_purchase", "create_subscription", "delete_entity", "update_entity", "none"] = "none"
+    target_entity_type: str | None = None
+    confidence: confloat(ge=0.0, le=1.0) | None = None
+    data_json: str = "{}"
     missing_fields: list[str] = []
     ambiguities: list[str] = []
 
@@ -53,7 +65,7 @@ class AssistantWriteIntent(StrictModel):
 class AnalysisStructuredOutput(StrictModel):
     answer_markdown: str
     questions_to_user: list[str] = []
-    write_intent: AssistantWriteIntent | None = None
+    write_intent: AssistantWriteIntentStructured | None = None
 
 
 class IngestDocumentClassificationOutput(StrictModel):
@@ -90,6 +102,22 @@ class IngestStructuredOutput(StrictModel):
     suggestions: list[IngestStructuredSuggestion]
 
 
+class AIRoute(StrictModel):
+    route_name: Literal[
+        "assistant_chat",
+        "assistant_write_intent",
+        "assistant_missing_info",
+        "deep_analysis",
+        "fallback_plain_text",
+    ]
+    model: str
+    mode: Literal["text", "structured"]
+    structured_required: bool
+    allow_write_intent: bool
+    allow_fallback: bool
+    reason: str
+
+
 def _require_openai(settings: Settings) -> None:
     if settings.openai_api_key:
         return
@@ -123,12 +151,17 @@ def _extract_output_text(body: dict[str, Any]) -> str:
 
 def _force_openai_strict(schema: dict[str, Any]) -> dict[str, Any]:
     if schema.get("type") == "object":
-        properties = schema.get("properties", {})
-        schema["required"] = list(properties.keys())
-        schema["additionalProperties"] = False
-        for child in properties.values():
-            if isinstance(child, dict):
-                _force_openai_strict(child)
+        properties = schema.get("properties")
+        if isinstance(properties, dict):
+            schema["required"] = list(properties.keys())
+            schema["additionalProperties"] = False
+            for child in properties.values():
+                if isinstance(child, dict):
+                    _force_openai_strict(child)
+        else:
+            # Free-form object fields (e.g. Dict[str, Any]) cannot carry
+            # object-level required keys in OpenAI's strict json_schema mode.
+            schema.pop("required", None)
     items = schema.get("items")
     if isinstance(items, dict):
         _force_openai_strict(items)
@@ -206,6 +239,54 @@ def _call_openai_structured(
         raise AIProviderResponseError(f"OpenAI returnerade ogiltig JSON för {schema_name}: {exc}") from exc
 
     return parsed, response_body.get("model", model), _usage_from_response(response_body)
+
+
+def _call_openai_text(
+    settings: Settings,
+    *,
+    model: str,
+    instructions: str,
+    payload: dict[str, Any],
+    max_output_tokens: int,
+) -> tuple[str, str, schemas.AIUsageRead | None]:
+    _require_openai(settings)
+    body = {
+        "model": model,
+        "input": [
+            {"role": "system", "content": [{"type": "input_text", "text": instructions}]},
+            {"role": "user", "content": [{"type": "input_text", "text": json.dumps(payload, ensure_ascii=False)}]},
+        ],
+        "text": {"verbosity": "low"},
+        "max_output_tokens": max_output_tokens,
+    }
+
+    with httpx.Client(timeout=settings.openai_timeout_seconds) as client:
+        response = client.post(
+            f"{_base_url(settings)}/responses",
+            headers={
+                "Authorization": f"Bearer {settings.openai_api_key}",
+                "Content-Type": "application/json",
+            },
+            json=body,
+        )
+
+    if response.status_code >= 400:
+        try:
+            error_body = response.json()
+        except ValueError:
+            error_body = {}
+        detail = (
+            error_body.get("error", {}).get("message")
+            or response.text
+            or f"{response.status_code} {response.reason_phrase}"
+        )
+        raise AIProviderResponseError(f"OpenAI-anropet misslyckades: {detail}")
+
+    response_body = response.json()
+    output_text = _extract_output_text(response_body).strip()
+    if not output_text:
+        raise AIProviderResponseError("OpenAI svarade utan läsbar text.")
+    return output_text, response_body.get("model", model), _usage_from_response(response_body)
 
 
 def _person_map(records: dict[str, list[dict[str, Any]]]) -> dict[int, str]:
@@ -413,16 +494,187 @@ def _pending_import_questions(db: Session, household_id: int) -> list[dict[str, 
     ]
 
 
+WRITE_INTENT_KEYWORDS = (
+    "lägg till",
+    "lägg in",
+    "skapa",
+    "registrera",
+    "uppdatera",
+    "ändra",
+    "ta bort",
+    "radera",
+)
+DEEP_ANALYSIS_KEYWORDS = (
+    "djup analys",
+    "stor genomgång",
+    "helhetsanalys",
+    "hitta motsägelser",
+    "revision",
+    "revidera",
+    "granska hela",
+    "jämför helheten",
+)
+
+
 def _analysis_model(settings: Settings) -> str:
-    return settings.openai_analysis_model or settings.openai_model
+    return settings.econ_ai_default_model or settings.openai_analysis_model or settings.openai_model
+
+
+def _structured_analysis_model(settings: Settings) -> str:
+    return settings.econ_ai_structured_model or settings.openai_analysis_model or _analysis_model(settings)
+
+
+def _deep_analysis_model(settings: Settings) -> str:
+    return settings.econ_ai_deep_analysis_model or settings.openai_analysis_model or _analysis_model(settings)
+
+
+def _fallback_model(settings: Settings) -> str:
+    return settings.econ_ai_fallback_model or _analysis_model(settings)
 
 
 def _ingest_model(settings: Settings) -> str:
     return settings.openai_ingest_model or settings.openai_model
 
 
+def _contains_any_keyword(text: str, keywords: tuple[str, ...]) -> bool:
+    lowered = text.lower()
+    return any(keyword in lowered for keyword in keywords)
+
+
+def _looks_like_write_intent(prompt: str) -> bool:
+    return _contains_any_keyword(prompt, WRITE_INTENT_KEYWORDS)
+
+
+def _looks_like_deep_analysis(prompt: str) -> bool:
+    return _contains_any_keyword(prompt, DEEP_ANALYSIS_KEYWORDS)
+
+
+def _has_amount_hint(prompt: str) -> bool:
+    lowered = prompt.lower()
+    return bool(re.search(r"\d", lowered)) or " kr" in lowered or "kron" in lowered
+
+
+def _has_cadence_hint(prompt: str) -> bool:
+    lowered = prompt.lower()
+    cadence_terms = ("per månad", "månad", "/mån", "mån", "vecka", "år", "varje")
+    return any(term in lowered for term in cadence_terms)
+
+
+def _is_missing_write_information(prompt: str) -> bool:
+    lowered = prompt.lower()
+    if "försäkring" in lowered and not _has_amount_hint(lowered):
+        return True
+    if "abonnemang" in lowered and not (_has_amount_hint(lowered) and _has_cadence_hint(lowered)):
+        return True
+    if _looks_like_write_intent(lowered):
+        return not (_has_amount_hint(lowered) or _has_cadence_hint(lowered))
+    return False
+
+
+def select_ai_route(task_type: str, prompt: str, settings: Settings, context: dict[str, Any] | None = None) -> AIRoute:
+    if task_type != "assistant":
+        return AIRoute(
+            route_name="assistant_chat",
+            model=_analysis_model(settings),
+            mode="text",
+            structured_required=False,
+            allow_write_intent=False,
+            allow_fallback=False,
+            reason="okänd task_type, använder säker textchatt",
+        )
+
+    if not settings.econ_ai_model_routing_enabled:
+        return AIRoute(
+            route_name="assistant_write_intent",
+            model=_structured_analysis_model(settings),
+            mode="structured",
+            structured_required=True,
+            allow_write_intent=True,
+            allow_fallback=True,
+            reason="modellrouting avstängd, använder kompatibelt structured assistant-läge",
+        )
+
+    if _looks_like_deep_analysis(prompt):
+        return AIRoute(
+            route_name="deep_analysis",
+            model=_deep_analysis_model(settings),
+            mode="text",
+            structured_required=False,
+            allow_write_intent=False,
+            allow_fallback=False,
+            reason="prompt matchar explicit djupanalysregler",
+        )
+
+    if _looks_like_write_intent(prompt):
+        if _is_missing_write_information(prompt):
+            return AIRoute(
+                route_name="assistant_missing_info",
+                model=_structured_analysis_model(settings),
+                mode="structured",
+                structured_required=True,
+                allow_write_intent=True,
+                allow_fallback=True,
+                reason="prompt signalerar write men saknar obligatoriska uppgifter",
+            )
+        return AIRoute(
+            route_name="assistant_write_intent",
+            model=_structured_analysis_model(settings),
+            mode="structured",
+            structured_required=True,
+            allow_write_intent=True,
+            allow_fallback=True,
+            reason="prompt signalerar explicit write-intent",
+        )
+
+    return AIRoute(
+        route_name="assistant_chat",
+        model=_analysis_model(settings),
+        mode="text",
+        structured_required=False,
+        allow_write_intent=False,
+        allow_fallback=False,
+        reason="ingen write/deep signal, använder standardchatt",
+    )
+
+
 def _format_analysis_answer(structured: AnalysisStructuredOutput) -> str:
     return structured.answer_markdown.strip()
+
+
+def _normalize_structured_write_intent(
+    intent: AssistantWriteIntentStructured | None,
+) -> AssistantWriteIntent | None:
+    if intent is None:
+        return None
+
+    data_payload: dict[str, Any] = {}
+    raw_data = (intent.data_json or "").strip()
+    if raw_data:
+        try:
+            parsed = json.loads(raw_data)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            parsed = {}
+            ambiguities = list(intent.ambiguities)
+            ambiguities.append("write_intent.data_json kunde inte tolkas och ignorerades.")
+            intent = AssistantWriteIntentStructured(
+                intent=intent.intent,
+                target_entity_type=intent.target_entity_type,
+                confidence=intent.confidence,
+                data_json="{}",
+                missing_fields=list(intent.missing_fields),
+                ambiguities=ambiguities,
+            )
+        if isinstance(parsed, dict):
+            data_payload = parsed
+
+    return AssistantWriteIntent(
+        intent=intent.intent,
+        target_entity_type=intent.target_entity_type,
+        confidence=intent.confidence,
+        data=data_payload,
+        missing_fields=list(intent.missing_fields),
+        ambiguities=list(intent.ambiguities),
+    )
 
 
 def _normalize_source_channel(source_channel: str | None, input_kind: str | None) -> str:
@@ -766,6 +1018,14 @@ def generate_analysis_answer(
     settings: Settings,
 ) -> tuple[str, list[str], AssistantWriteIntent | None, str, schemas.AIUsageRead | None]:
     context = _compact_household_context(db, household_id)
+    route = select_ai_route("assistant", prompt, settings, context)
+    logger.info(
+        "assistant_route_selected route=%s model=%s mode=%s reason=%s",
+        route.route_name,
+        route.model,
+        route.mode,
+        route.reason,
+    )
     instructions = (
         "Du är systemets AI-assistent. Din uppgift är at tolka användarens inmatning, svara på frågor och extrahera eventuella intentioner för att skriva till systemet.\n"
         "REGLER FÖR WRITE-INTENTS OCH FRÅGOR:\n"
@@ -789,17 +1049,71 @@ def generate_analysis_answer(
         "conversation": [msg.dict() for msg in (conversation or [])],
         "household_context": context,
     }
-    structured, model_name, usage = _call_openai_structured_with_retry(
-        settings,
-        model=_analysis_model(settings),
-        instructions=instructions,
-        payload=payload,
-        response_model=AnalysisStructuredOutput,
-        schema_name="analysis_response",
-        max_output_tokens=1000,
+    plain_text_instructions = (
+        "Du är systemets AI-assistent. Svara kort och konkret i markdown "
+        "på användarens fråga utifrån household_context. Uppfinn inte data. "
+        "Håll svaret under 150 ord."
     )
+    if route.route_name == "deep_analysis":
+        plain_text_instructions = (
+            "Du är systemets AI-assistent för djupare ekonomisk analys. "
+            "Analysera household_context grundligt, lyft motsägelser/risker tydligt "
+            "och föreslå verifierbara nästa steg utan att skapa write_intent."
+        )
 
-    answer = _format_analysis_answer(structured)
+    if route.mode == "structured":
+        try:
+            structured, model_name, usage = _call_openai_structured_with_retry(
+                settings,
+                model=route.model,
+                instructions=instructions,
+                payload=payload,
+                response_model=AnalysisStructuredOutput,
+                schema_name="analysis_response",
+                max_output_tokens=1000,
+            )
+            answer = _format_analysis_answer(structured)
+            questions_to_user = structured.questions_to_user
+            write_intent = _normalize_structured_write_intent(structured.write_intent)
+            if not route.allow_write_intent:
+                write_intent = None
+        except AIProviderResponseError as exc:
+            if not route.allow_fallback or "invalid schema for response_format 'analysis_response'" not in str(exc).lower():
+                raise
+            fallback_route = AIRoute(
+                route_name="fallback_plain_text",
+                model=_fallback_model(settings),
+                mode="text",
+                structured_required=False,
+                allow_write_intent=False,
+                allow_fallback=False,
+                reason=f"structured schema/provider error: {exc}",
+            )
+            logger.warning(
+                "assistant_route_fallback route=%s model=%s reason=%s",
+                fallback_route.route_name,
+                fallback_route.model,
+                fallback_route.reason,
+            )
+            answer, model_name, usage = _call_openai_text(
+                settings,
+                model=fallback_route.model,
+                instructions=plain_text_instructions,
+                payload=payload,
+                max_output_tokens=700,
+            )
+            questions_to_user = []
+            write_intent = None
+    else:
+        answer, model_name, usage = _call_openai_text(
+            settings,
+            model=route.model,
+            instructions=plain_text_instructions,
+            payload=payload,
+            max_output_tokens=700,
+        )
+        questions_to_user = []
+        write_intent = None
 
     questions = context.get("pending_import_questions", [])
     if questions and "har frågor" not in answer.lower():
@@ -807,7 +1121,7 @@ def generate_analysis_answer(
         for q in questions:
             answer += f"- {q.get('question_text')}\n"
 
-    return answer, structured.questions_to_user, structured.write_intent, model_name, usage
+    return answer, questions_to_user, write_intent, model_name, usage
 
 
 def _ingest_field_guides(records: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:

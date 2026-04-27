@@ -1,5 +1,17 @@
 # Fullständig korrekthetsgenomgång 2026-04-27
 
+## Plan - Assistant model routing 2026-04-27
+- [x] Kartlägg nuvarande model/config-användning i assistant + ingest + docs/tests.
+- [x] Implementera explicit route-policy med deterministiska regler och env-styrda modeller.
+- [x] Behåll no-auto-write och one-shot apply; fallback ska alltid vara text + `write_intent=null`.
+- [x] Lägg regressionstester för route-val, fallbackmodell och configstyrning.
+- [x] Uppdatera docs (`AI_CONTRACT`, `SOURCE_OF_TRUTH`, `.env.example`) och verifiera med testsvit + health + diff-check.
+
+## Review - Assistant model routing 2026-04-27
+- Implementerat: explicit assistant-routing med routes `assistant_chat`, `assistant_write_intent`, `assistant_missing_info`, `deep_analysis` och `fallback_plain_text`.
+- Säkerhet: ingen route kan skriva kanonisk data i `respond`; fallback returnerar alltid text utan `write_intent`.
+- Konfigurering: nya env-nycklar `ECON_AI_*` styr modellval utan hårdkodning i flödeskod.
+
 ## Plan - Data-In provenance hardening 2026-04-27
 - [x] Inför serverägd persistence för `analyze` med `analysis_result_id`, source hash, normalized suggestions och schema-version.
 - [x] Kräv `analysis_result_id` i `promote`, ladda serverlagrat analyze-resultat och ignorera klientägda suggestions.

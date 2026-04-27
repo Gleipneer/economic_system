@@ -15,6 +15,11 @@ class Settings(BaseSettings):
     openai_model: str = "gpt-5.4"
     openai_analysis_model: Optional[str] = None
     openai_ingest_model: Optional[str] = None
+    econ_ai_model_routing_enabled: bool = True
+    econ_ai_default_model: Optional[str] = None
+    econ_ai_structured_model: Optional[str] = None
+    econ_ai_deep_analysis_model: Optional[str] = None
+    econ_ai_fallback_model: Optional[str] = None
     openai_base_url: Optional[str] = None
     openai_timeout_seconds: float = 45.0
 
@@ -49,6 +54,11 @@ class Settings(BaseSettings):
             "openai_model": {"env": "OPENAI_MODEL"},
             "openai_analysis_model": {"env": "OPENAI_ANALYSIS_MODEL"},
             "openai_ingest_model": {"env": "OPENAI_INGEST_MODEL"},
+            "econ_ai_model_routing_enabled": {"env": "ECON_AI_MODEL_ROUTING_ENABLED"},
+            "econ_ai_default_model": {"env": "ECON_AI_DEFAULT_MODEL"},
+            "econ_ai_structured_model": {"env": "ECON_AI_STRUCTURED_MODEL"},
+            "econ_ai_deep_analysis_model": {"env": "ECON_AI_DEEP_ANALYSIS_MODEL"},
+            "econ_ai_fallback_model": {"env": "ECON_AI_FALLBACK_MODEL"},
             "openai_base_url": {"env": "OPENAI_BASE_URL"},
             "openai_timeout_seconds": {"env": "OPENAI_TIMEOUT_SECONDS"},
         }

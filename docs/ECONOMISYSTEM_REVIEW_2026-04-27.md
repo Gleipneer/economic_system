@@ -75,6 +75,7 @@ förvaltningsbarhet.
   - PDF/text/OCR/Excel-vägar finns
 - Assistantchat:
   - persisterad tråd och meddelanden
+  - explicit modellrouting (`assistant_chat`, `assistant_write_intent`, `assistant_missing_info`, `deep_analysis`, `fallback_plain_text`)
   - `write_intent` sparas i chatthistorik
   - `apply_intent` kräver `source_message_id`
   - replay av samma source blockeras
