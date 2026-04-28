@@ -251,6 +251,53 @@ def create_household_fixture(client: TestClient) -> dict[str, int]:
     }
 
 
+def seed_ingest_analysis_result(
+    *,
+    household_id: int,
+    document_id: int,
+    source_channel: str,
+    source_name: str,
+    extracted_text: str,
+    suggestions: list[dict],
+    document_summary: dict,
+) -> str:
+    from uuid import uuid4
+
+    from app import ai_services, database, models
+    from app.ingest_content import normalize_ingest_text
+
+    analysis_result_id = str(uuid4())
+    source_hash = ai_services._compute_ingest_source_hash(
+        household_id=household_id,
+        source_channel=source_channel,
+        source_name=source_name,
+        document_id=document_id,
+        normalized_input_text=normalize_ingest_text(extracted_text),
+    )
+    db = database.SessionLocal()
+    try:
+        db.add(
+            models.IngestAnalysisResult(
+                analysis_result_id=analysis_result_id,
+                household_id=household_id,
+                document_id=document_id,
+                source_hash=source_hash,
+                source_channel=source_channel,
+                source_name=source_name,
+                normalized_suggestions=suggestions,
+                document_summary=document_summary,
+                detected_kind=document_summary.get("document_type"),
+                provider="test",
+                model="test-seeded",
+                analysis_schema_version="ingest-analysis-v1",
+            )
+        )
+        db.commit()
+    finally:
+        db.close()
+    return analysis_result_id
+
+
 def test_healthz_and_home(tmp_path):
     app = load_app(tmp_path)
     with TestClient(app) as client:
@@ -614,9 +661,35 @@ def test_ingest_promote_reuses_existing_document_id(tmp_path):
             "uncertainty_notes": ["Viss avrundning kan förekomma."],
         }
 
+        analysis_result_id = seed_ingest_analysis_result(
+            household_id=household_id,
+            document_id=document_id,
+            source_channel="uploaded_document",
+            source_name="Resurs Bank",
+            extracted_text="Resurs Bank faktura april 299 kr förfaller 2026-04-12.",
+            suggestions=[suggestion],
+            document_summary={
+                "document_type": "invoice",
+                "provider_name": "Resurs Bank",
+                "label": "Resurs Bank faktura april",
+                "amount": 299,
+                "currency": "SEK",
+                "due_date": "2026-04-12",
+                "cadence": "monthly",
+                "category_hint": "subscription",
+                "suggested_target_entity_type": "recurring_cost",
+                "household_relevance": "high",
+                "confidence": 0.94,
+                "confirmed_fields": ["provider_name", "amount", "due_date"],
+                "notes": ["Beloppet är tydligt."],
+                "uncertainty_reasons": ["Cadence är tolkad."],
+            },
+        )
+
         response = client.post(
             f"/households/{household_id}/ingest_ai/promote",
             json={
+                "analysis_result_id": analysis_result_id,
                 "document_id": document_id,
                 "source_channel": "uploaded_document",
                 "source_name": "Resurs Bank",
@@ -1023,9 +1096,80 @@ def test_document_review_flow_for_loan_invoice_upload_and_apply(tmp_path):
         document_id = upload.json()["id"]
         assert upload.json()["extraction_status"] == "interpreted"
 
+        analysis_result_id = seed_ingest_analysis_result(
+            household_id=household_id,
+            document_id=document_id,
+            source_channel="uploaded_document",
+            source_name="Volvofinans",
+            extracted_text=(
+                "Volvofinans låneavi\n"
+                "Kontraktsnummer VF-7788\n"
+                "Objekt Volvo XC60\n"
+                "Ränta 6.45\n"
+                "Skuld före amortering 185000\n"
+                "Belopp att betala 4525\n"
+                "Förfallodatum 2026-05-28\n"
+                "Amortering 3100\n"
+                "Räntekostnad 1180\n"
+                "Avgifter 245\n"
+            ),
+            suggestions=[
+                {
+                    "target_entity_type": "loan",
+                    "review_bucket": "loan",
+                    "title": "Volvofinans billån",
+                    "rationale": "Tydlig låneavi.",
+                    "confidence": 0.91,
+                    "proposed_json": {
+                        "household_id": household_id,
+                        "type": "car",
+                        "lender": "Volvofinans",
+                        "current_balance": 185000,
+                        "required_monthly_payment": 4525,
+                        "nominal_rate": 6.45,
+                        "amortization_amount_monthly": 3100,
+                        "purpose": "Volvo XC60",
+                        "status": "active",
+                    },
+                    "review_json": {
+                        "lender": "Volvofinans",
+                        "interest_rate": 6.45,
+                        "debt_before_amortization": 185000,
+                        "payment_amount": 4525,
+                        "payment_due_date": "2026-05-28",
+                        "object_vehicle": "Volvo XC60",
+                        "contract_number": "VF-7788",
+                        "amortization": 3100,
+                        "interest_cost": 1180,
+                        "fees": 245,
+                    },
+                    "validation_status": "valid",
+                    "validation_errors": [],
+                    "uncertainty_notes": [],
+                }
+            ],
+            document_summary={
+                "document_type": "loan_or_credit",
+                "provider_name": "Volvofinans",
+                "label": "Volvofinans låneavi",
+                "amount": 4525,
+                "currency": "SEK",
+                "due_date": "2026-05-28",
+                "cadence": "monthly",
+                "category_hint": "vehicle",
+                "suggested_target_entity_type": "loan",
+                "household_relevance": "high",
+                "confidence": 0.96,
+                "confirmed_fields": ["provider_name", "amount", "due_date"],
+                "notes": [],
+                "uncertainty_reasons": [],
+            },
+        )
+
         promote = client.post(
             f"/households/{household_id}/ingest_ai/promote",
             json={
+                "analysis_result_id": analysis_result_id,
                 "document_id": document_id,
                 "source_channel": "uploaded_document",
                 "source_name": "Volvofinans",
