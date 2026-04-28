@@ -1,3 +1,5 @@
+# Historisk rapport. För aktuell status, se docs/uptodate/.
+#
 # Ekonomisystem Review 2026-04-27
 
 ## Syfte och läsanvisning

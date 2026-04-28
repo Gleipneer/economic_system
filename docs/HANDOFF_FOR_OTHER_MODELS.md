@@ -1,3 +1,5 @@
+# Historisk onboarding-snapshot. För aktuell status, se docs/uptodate/.
+#
 # Handoff för andra AI-modeller
 
 Extremt kondenserad onboarding. Läs denna fil först.

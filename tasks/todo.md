@@ -1,3 +1,5 @@
+# Historisk arbetslogg. För aktuell status och kontrakt, se docs/uptodate/.
+#
 # Fullständig korrekthetsgenomgång 2026-04-27
 
 ## Plan - Assistant model routing 2026-04-27
